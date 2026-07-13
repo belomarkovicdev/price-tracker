@@ -51,5 +51,10 @@ sites:
         url: "https://www.polovniautomobili.com/auto-oglasi/pretraga?brand=Volkswagen&model[]=Golf+7&sort=basic"
       - name: "Renault >=2014"
         url: "https://www.polovniautomobili.com/auto-oglasi/pretraga?brand=Renault&model[]=Megane&sort=basic&yearFrom=2014"
+      # Multiple models within one brand (comma-separated model[]) + a year
+      # range. Each listing is still grouped by its own (brand, model, year),
+      # so this watches every model/year combo in the range independently.
+      - name: "Audi A-class 2010-2017"
+        url: "https://www.polovniautomobili.com/auto-oglasi/pretraga?brand=Audi&model[]=A6,A4,A5,A3,A2,A1,A4+Allroad&sort=basic&yearFrom=2010&yearTo=2017"
       # - name: "VW Golf 7 diesel manual"
       #   url: "https://www.polovniautomobili.com/auto-oglasi/pretraga?brand=140&model%5B%5D=10613&fuel%5B%5D=3400"
