@@ -13,7 +13,7 @@ poll_interval_seconds: 20
 # breaker is hardcoded and NOT configurable; see price_tracker/ratelimit.py.)
 evaluator:
   window_rows: 50 # rolling window size: use the most recent N comparables
-  min_samples: 8 # don't judge a bucket until it has at least this many rows
+  min_samples: 4 # don't judge a bucket until it has at least this many rows
   mad_k: 1.5 # deal if price <= median - mad_k * MAD
   bottom_percentile: 20 # ...or price sits in the bottom Nth percentile of the window
   min_deal_discount: 0.12 # require at least this fraction below the median to alert
@@ -38,7 +38,7 @@ sites:
     # First sight of a search: fetch this many pages (from page 1) to seed the
     # comparable corpus, so already-underpriced listings can be judged and
     # alerted right away instead of after days of warm-up. ~25 listings/page.
-    seed_pages: 5
+    seed_pages: 8
     # Steady state: each cycle fetch this many pages from page 1 (the newest
     # listings), a fixed count. Raise it if many new posts arrive between cycles.
     scan_pages: 2
