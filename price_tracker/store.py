@@ -108,6 +108,14 @@ CREATE TABLE IF NOT EXISTS model_prices (
     updated_at   REAL,
     PRIMARY KEY (brand, model, year)
 );
+
+-- Which searches have already been seeded (wide first-sight fetch). Persisted
+-- so a restart trusts the corpus already in the db and skips re-seeding —
+-- it goes straight to the light steady-state scan for fresh listings.
+CREATE TABLE IF NOT EXISTS seed_state (
+    seed_key   TEXT PRIMARY KEY,   -- "<site>:<search_name>"
+    seeded_at  REAL
+);
 """
 
 
@@ -287,6 +295,21 @@ class Store:
             "SELECT * FROM model_prices WHERE brand = ? AND model = ? AND year = ?",
             (brand, model, year),
         ).fetchone()
+
+    # -- seed state ---------------------------------------------------------
+    def seeded_keys(self) -> set[str]:
+        """Searches already seeded in a previous run — loaded once at startup so
+        restarts don't re-fetch a corpus the db already holds."""
+        return {r["seed_key"] for r in self.conn.execute(
+            "SELECT seed_key FROM seed_state")}
+
+    def mark_seeded(self, seed_key: str) -> None:
+        self.conn.execute(
+            "INSERT INTO seed_state (seed_key, seeded_at) VALUES (?,?) "
+            "ON CONFLICT(seed_key) DO UPDATE SET seeded_at=excluded.seeded_at",
+            (seed_key, time.time()),
+        )
+        self.conn.commit()
 
     # -- alerts -------------------------------------------------------------
     def already_alerted(self, key: str, price: Optional[float]) -> bool:
