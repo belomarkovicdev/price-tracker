@@ -27,6 +27,9 @@ from .store import Store
 
 log = logging.getLogger(__name__)
 
+# Refresh each brand+model+year average at most this often.
+_AVG_TTL_SECONDS = 24 * 3600
+
 
 class Engine:
     def __init__(self, cfg: Config) -> None:
@@ -151,20 +154,27 @@ class Engine:
                 self.cfg.evaluator.bottom_percentile,
             )
 
-        # Update the collapsed per-(brand, model, year) average price. One row
-        # per model-year, upserted — never duplicated.
+        # Refresh the per-(brand, model, year) average price — but at most once
+        # per 24h per model-year (the TTL skips the recompute if it's fresh).
+        # One row per model-year, upserted — never duplicated.
         for brand, model, year in touched_models:
-            self.store.update_model_price(brand, model, year)
-
-        # Pass 2: evaluate every listing against the now-complete window.
-        for listing in listings:
-            bucket = listing.bucket()
-            if bucket is None:
-                continue
-            comparables = self.store.recent_bucket_prices(
-                bucket, self.cfg.evaluator.window_rows, exclude_key=listing.key
+            self.store.update_model_price(
+                brand, model, year, ttl_seconds=_AVG_TTL_SECONDS
             )
-            verdict = self.evaluator.evaluate(listing, comparables)
+
+        # Pass 2: evaluate each listing against the single stored average price
+        # for its brand+model+year.
+        for listing in listings:
+            if not (listing.brand and listing.model and listing.year):
+                continue
+            row = self.store.get_model_price(
+                listing.brand, listing.model, listing.year
+            )
+            if row is None:
+                continue
+            verdict = self.evaluator.evaluate(
+                listing, row["avg_price"], row["sample_count"]
+            )
             if not verdict.is_deal:
                 continue
             if self.store.already_alerted(listing.key, listing.price):

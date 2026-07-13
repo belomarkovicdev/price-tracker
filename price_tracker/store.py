@@ -265,11 +265,21 @@ class Store:
 
     # -- per model+year average --------------------------------------------
     def update_model_price(
-        self, brand: str, model: str, year: int
+        self, brand: str, model: str, year: int,
+        ttl_seconds: Optional[float] = None,
     ) -> Optional[dict]:
         """Recompute the average price across all active, priced listings with
         this exact brand+model+year and upsert the single row for it. Returns
-        the row (or None if there are no priced listings for it yet)."""
+        the row (or None if there are no priced listings for it yet).
+
+        If ttl_seconds is given and the stored row was refreshed more recently
+        than that, the recompute is skipped and the existing row is returned
+        unchanged — so the average refreshes at most once per ttl (e.g. daily)."""
+        if ttl_seconds is not None:
+            existing = self.get_model_price(brand, model, year)
+            if (existing is not None and existing["updated_at"] is not None
+                    and time.time() - existing["updated_at"] < ttl_seconds):
+                return dict(existing)
         row = self.conn.execute(
             "SELECT AVG(price) AS avg, COUNT(*) AS n FROM listings "
             "WHERE brand = ? AND model = ? AND year = ? "
