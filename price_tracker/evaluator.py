@@ -1,19 +1,23 @@
 """Decide whether a listing is a below-average deal worth alerting on.
 
-Approach:
-  * Each brand+model+year has a single stored average price (see the
-    model_prices table), refreshed at most once per 24h.
-  * A listing is a deal when its price is meaningfully below that average:
-    the discount vs the average is at least `min_deal_discount`.
+Approach (robust to outliers and scams):
+  * Each brand+model+year has a single stored row of price stats (median, MAD,
+    low-percentile), recomputed at most once per 24h from the full sample (see
+    store.update_model_price). Evaluation reads just that one row.
+  * Use MEDIAN + MAD, not mean/stddev — one absurd listing can't skew the median.
+  * A listing is a deal when its price is meaningfully below the pack:
+        price <= median - mad_k * MAD        (statistically cheap), OR
+        price <= low-percentile of the sample (cheapest slice),
+    AND the discount vs median is at least `min_deal_discount`.
   * Scam/typo/parts guard: ignore prices that are absurdly low
-    (< scam_floor_ratio * avg) or below an absolute floor (`min_price`).
-  * Don't judge against a thin average (fewer than `min_samples` listings).
+    (< scam_floor_ratio * median) or below an absolute floor (`min_price`).
+  * Don't judge against a thin sample (fewer than `min_samples` listings).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 from .config import EvaluatorConfig
 from .models import Listing
@@ -24,20 +28,19 @@ class Verdict:
     is_deal: bool
     reason: str
     price: Optional[float] = None
-    avg: Optional[float] = None
+    median: Optional[float] = None
     sample_size: int = 0
-    discount: float = 0.0          # fraction below avg, e.g. 0.18 = 18% cheaper
+    discount: float = 0.0          # fraction below median, e.g. 0.18 = 18% cheaper
 
 
 class Evaluator:
     def __init__(self, cfg: EvaluatorConfig) -> None:
         self.cfg = cfg
 
-    def evaluate(
-        self, listing: Listing, avg_price: Optional[float], sample_count: int
-    ) -> Verdict:
-        """Compare the listing's price to the stored average price for its
-        brand+model+year (a single number), not a live window of comparables."""
+    def evaluate(self, listing: Listing, stats: Mapping[str, Any]) -> Verdict:
+        """Compare the listing's price to the stored stats (median / MAD /
+        low-percentile) for its brand+model+year — a single pre-computed row,
+        not a live window recomputed per listing."""
         cfg = self.cfg
         price = listing.price
 
@@ -47,26 +50,34 @@ class Evaluator:
             return Verdict(False, "not enough attributes to compare")
         if price < cfg.min_price:
             return Verdict(False, f"below absolute floor ({cfg.min_price})", price)
-        if not avg_price or sample_count < cfg.min_samples:
-            return Verdict(
-                False,
-                f"thin data ({sample_count}<{cfg.min_samples} listings)",
-                price, sample_size=sample_count,
-            )
 
-        avg = avg_price
-        discount = (avg - price) / avg if avg else 0.0
+        median = stats["median"]
+        n = stats["sample_count"] or 0
+        if median is None or n < cfg.min_samples:
+            return Verdict(False, f"thin data ({n}<{cfg.min_samples} listings)",
+                           price, sample_size=n)
+
+        discount = (median - price) / median if median else 0.0
 
         # Scam / typo / for-parts guard.
-        if price < cfg.scam_floor_ratio * avg:
+        if price < cfg.scam_floor_ratio * median:
             return Verdict(False, "suspiciously low (scam/parts guard)",
-                           price, avg, sample_count, discount)
+                           price, median, n, discount)
 
-        if discount >= cfg.min_deal_discount:
+        mad = stats["mad"] or 0.0
+        p_low = stats["p_low"]
+        mad_threshold = median - cfg.mad_k * mad if mad > 0 else median
+        statistically_cheap = (price <= mad_threshold
+                               or (p_low is not None and price <= p_low))
+        meaningful = discount >= cfg.min_deal_discount
+
+        if statistically_cheap and meaningful:
             return Verdict(
                 True,
-                f"{discount * 100:.0f}% below avg of {sample_count} listings",
-                price, avg, sample_count, discount,
+                f"{discount * 100:.0f}% below median of {n} listings",
+                price, median, n, discount,
             )
-        return Verdict(False, f"only {discount * 100:.0f}% below avg",
-                       price, avg, sample_count, discount)
+        if not meaningful:
+            return Verdict(False, f"only {discount * 100:.0f}% below median",
+                           price, median, n, discount)
+        return Verdict(False, "within normal spread", price, median, n, discount)

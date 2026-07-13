@@ -104,6 +104,9 @@ CREATE TABLE IF NOT EXISTS model_prices (
     model        TEXT NOT NULL,
     year         INTEGER NOT NULL,
     avg_price    REAL,
+    median       REAL,
+    mad          REAL,
+    p_low        REAL,
     sample_count INTEGER,
     updated_at   REAL,
     PRIMARY KEY (brand, model, year)
@@ -130,7 +133,19 @@ class Store:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(_SCHEMA)
+        # Additive migration for DBs created before model_prices grew its robust
+        # stat columns. CREATE TABLE IF NOT EXISTS won't add columns to an
+        # existing table, so backfill any that are missing.
+        self._add_columns("model_prices",
+                          {"median": "REAL", "mad": "REAL", "p_low": "REAL"})
         self.conn.commit()
+
+    def _add_columns(self, table: str, cols: dict[str, str]) -> None:
+        existing = {r["name"]
+                    for r in self.conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in cols.items():
+            if name not in existing:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     def close(self) -> None:
         self.conn.close()
@@ -266,40 +281,53 @@ class Store:
     # -- per model+year average --------------------------------------------
     def update_model_price(
         self, brand: str, model: str, year: int,
+        bottom_percentile: float = 20.0,
         ttl_seconds: Optional[float] = None,
     ) -> Optional[dict]:
-        """Recompute the average price across all active, priced listings with
-        this exact brand+model+year and upsert the single row for it. Returns
-        the row (or None if there are no priced listings for it yet).
+        """Recompute the price stats (avg, median, MAD, low-percentile) across
+        all active, priced listings with this exact brand+model+year and upsert
+        the single row for it. Returns the row (or None if there are no priced
+        listings for it yet).
+
+        The whole sample is read here — this is the one place that needs it —
+        so the stored median/MAD are as robust as a live computation. Evaluation
+        then reads just this one row.
 
         If ttl_seconds is given and the stored row was refreshed more recently
         than that, the recompute is skipped and the existing row is returned
-        unchanged — so the average refreshes at most once per ttl (e.g. daily)."""
+        unchanged — so the stats refresh at most once per ttl (e.g. daily)."""
         if ttl_seconds is not None:
             existing = self.get_model_price(brand, model, year)
             if (existing is not None and existing["updated_at"] is not None
                     and time.time() - existing["updated_at"] < ttl_seconds):
                 return dict(existing)
-        row = self.conn.execute(
-            "SELECT AVG(price) AS avg, COUNT(*) AS n FROM listings "
+        prices = [r["price"] for r in self.conn.execute(
+            "SELECT price FROM listings "
             "WHERE brand = ? AND model = ? AND year = ? "
             "AND price IS NOT NULL AND status = 'active'",
             (brand, model, year),
-        ).fetchone()
-        if row is None or not row["n"]:
+        )]
+        if not prices:
             return None
+        median = statistics.median(prices)
         stats = {
             "brand": brand, "model": model, "year": year,
-            "avg_price": row["avg"], "sample_count": row["n"],
+            "avg_price": statistics.fmean(prices),
+            "median": median,
+            "mad": statistics.median([abs(p - median) for p in prices]),
+            "p_low": _percentile(sorted(prices), bottom_percentile),
+            "sample_count": len(prices),
             "updated_at": time.time(),
         }
         self.conn.execute(
             """
-            INSERT INTO model_prices (brand, model, year, avg_price,
-                sample_count, updated_at)
-            VALUES (:brand,:model,:year,:avg_price,:sample_count,:updated_at)
+            INSERT INTO model_prices (brand, model, year, avg_price, median,
+                mad, p_low, sample_count, updated_at)
+            VALUES (:brand,:model,:year,:avg_price,:median,:mad,:p_low,
+                :sample_count,:updated_at)
             ON CONFLICT(brand, model, year) DO UPDATE SET
-                avg_price=excluded.avg_price,
+                avg_price=excluded.avg_price, median=excluded.median,
+                mad=excluded.mad, p_low=excluded.p_low,
                 sample_count=excluded.sample_count,
                 updated_at=excluded.updated_at
             """,

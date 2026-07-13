@@ -159,7 +159,9 @@ class Engine:
         # One row per model-year, upserted — never duplicated.
         for brand, model, year in touched_models:
             self.store.update_model_price(
-                brand, model, year, ttl_seconds=_AVG_TTL_SECONDS
+                brand, model, year,
+                bottom_percentile=self.cfg.evaluator.bottom_percentile,
+                ttl_seconds=_AVG_TTL_SECONDS,
             )
 
         # Pass 2: evaluate each listing against the single stored average price
@@ -172,9 +174,7 @@ class Engine:
             )
             if row is None:
                 continue
-            verdict = self.evaluator.evaluate(
-                listing, row["avg_price"], row["sample_count"]
-            )
+            verdict = self.evaluator.evaluate(listing, row)
             if not verdict.is_deal:
                 continue
             if self.store.already_alerted(listing.key, listing.price):
