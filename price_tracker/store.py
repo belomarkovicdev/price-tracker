@@ -124,6 +124,10 @@ CREATE TABLE IF NOT EXISTS seed_state (
 
 class Store:
     def __init__(self, db_path: Path) -> None:
+        # Ensure the parent dir exists (e.g. a mounted volume path like /data)
+        # so sqlite can create the file there.
+        db_path = Path(db_path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(db_path))
         self.conn.row_factory = sqlite3.Row
         # WAL + NORMAL sync: writes stay durable per commit against app crashes,

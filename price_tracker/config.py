@@ -123,9 +123,15 @@ def load_config(path: Path | None = None) -> Config:
             )
         )
 
+    # DB location: default next to the code, or override with DB_PATH so a
+    # mounted volume (e.g. Railway) can hold the corpus across redeploys.
+    db_env = os.environ.get("DB_PATH")
+    db_path = Path(db_env) if db_env else ROOT / "price_tracker.db"
+
     return Config(
         poll_interval_seconds=float(data.get("poll_interval_seconds", 20)),
         evaluator=evaluator,
         telegram=telegram,
         sites=sites,
+        db_path=db_path,
     )

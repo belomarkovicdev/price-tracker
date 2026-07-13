@@ -24,18 +24,29 @@ These are read from the environment directly (`config.py` uses
 `os.environ`), so **no `.env` file is needed in the container**. If Telegram
 vars are missing the app still runs and logs alerts in dry-run mode.
 
-## 3. Deploy
+## 3. Persist the corpus across redeploys (recommended)
+
+By default the SQLite db lives inside the container and is **wiped on every
+redeploy**, forcing a full re-seed (with the current config that's 13 searches ×
+`seed_pages` ≈ 100+ page fetches). To keep the accumulated corpus and medians:
+
+1. Service → **Variables** → add a **Volume**, mount path **`/data`**.
+2. Service → **Variables** → add `DB_PATH` = **`/data/price_tracker.db`**.
+
+The app reads `DB_PATH` and stores the db on the volume (creating `/data` if
+needed), so redeploys reuse the existing corpus instead of re-scraping. Leave
+`DB_PATH` unset to keep the db next to the code (ephemeral).
+
+## 4. Deploy
 
 Railway builds and starts the container. Watch **Deploy Logs / Observability**
 for the poll cycles.
 
 ## Notes / caveats
 
-- **State is ephemeral.** `price_tracker.db` lives inside the container and is
-  wiped on every redeploy. On restart the app reseeds its comparable corpus via
-  `seed_pages` (see `config.yaml`), so alerts resume after a short warm-up. To
-  persist the corpus across redeploys, attach a Railway **Volume** and point the
-  DB at it (would need a small `DB_PATH` env override in `config.py`).
+- **First run is heavy, once.** Seeding all searches takes several minutes; with
+  a volume it only happens the first time. Without a volume it repeats on every
+  redeploy.
 - **Datacenter IP.** Scraping from Railway's IP ranges is more likely to be
   blocked than from a home IP. The rate-limit circuit breaker and block
   detection are already in place; if the site pushes back, raise
