@@ -137,18 +137,34 @@ class Store:
             parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             log.error("Could not create DB dir %s: %s", parent, exc)
+        try:
+            contents = sorted(os.listdir(parent))[:20]
+        except OSError:
+            contents = "n/a"
         log.info(
-            "Opening DB at %s (uid=%s, dir exists=%s, dir writable=%s)",
-            db_path, uid, parent.exists(), os.access(parent, os.W_OK),
+            "Opening DB at %s (uid=%s, target exists=%s, target is_dir=%s, "
+            "parent exists=%s, parent writable=%s, parent contents=%s)",
+            db_path, uid, db_path.exists(), db_path.is_dir(),
+            parent.exists(), os.access(parent, os.W_OK), contents,
         )
+        # A common Railway mistake: the volume mount path was set to the DB file
+        # path itself, so the mount point exists as a DIRECTORY and sqlite can't
+        # open it as a file. Fail with a clear, actionable message.
+        if db_path.is_dir():
+            raise RuntimeError(
+                f"{db_path} is a directory, not a file. The volume mount path "
+                f"is almost certainly set to '{db_path}' — set it to '{parent}' "
+                f"instead (the folder), keeping DB_PATH={db_path}. Or point "
+                f"DB_PATH at a different filename inside the mounted folder."
+            )
         try:
             self.conn = sqlite3.connect(str(db_path))
         except sqlite3.OperationalError as exc:
             log.error(
-                "sqlite could not open %s: %s. Running as uid=%s; dir %s "
-                "writable=%s. If on a mounted volume, the volume mount path "
-                "must equal the DB_PATH directory and be writable by this user.",
-                db_path, exc, uid, parent, os.access(parent, os.W_OK),
+                "sqlite could not open %s: %s. Running as uid=%s; parent %s "
+                "writable=%s. If on a mounted volume, set the volume mount path "
+                "to the DB_PATH *directory* (%s), not the file.",
+                db_path, exc, uid, parent, os.access(parent, os.W_OK), parent,
             )
             raise
         self.conn.row_factory = sqlite3.Row
