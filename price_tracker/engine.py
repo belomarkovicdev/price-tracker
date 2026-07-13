@@ -41,8 +41,13 @@ class Engine:
             scraper = build_scraper(site)
             if scraper is not None:
                 self.scrapers[site.name] = (site, scraper)
-        # Searches we've already seeded (fetched multiple pages for) this run.
-        self._seeded: set[str] = set()
+        # Searches we've already seeded (fetched multiple pages for). Loaded
+        # from the db so a restart trusts the existing corpus and skips the
+        # wide re-seed — it only does the light steady-state scan for new posts.
+        self._seeded: set[str] = self.store.seeded_keys()
+        if self._seeded:
+            log.info("Resuming: %d search(es) already seeded in db.",
+                     len(self._seeded))
         self._running = True
 
     def stop(self, *_: object) -> None:
@@ -80,9 +85,11 @@ class Engine:
                 # We always start deeper than the paid "members-first" pages:
                 # those inflate the average and don't carry new posts.
                 start_page = site.start_page
-                if seed_key not in self._seeded:
-                    # First sight: seed a wider range to build the corpus so
-                    # already-underpriced listings can be judged right away.
+                was_seeded = seed_key in self._seeded
+                if not was_seeded:
+                    # First sight ever (across runs): seed a wider range to build
+                    # the corpus so already-underpriced listings can be judged
+                    # right away.
                     num_pages = site.seed_pages
                     log.info(
                         "[%s] seeding %r: pages %d-%d (skipping first %d)...",
@@ -96,8 +103,11 @@ class Engine:
                 seeded = self._process_search(
                     scraper, search.name, search.url, start_page, num_pages
                 )
-                if seeded:
+                # Record the seed only on the first successful wide fetch, and
+                # persist it so future restarts skip re-seeding this search.
+                if seeded and not was_seeded:
                     self._seeded.add(seed_key)
+                    self.store.mark_seeded(seed_key)
 
     def _process_search(
         self, scraper, search_name: str, url: str,
