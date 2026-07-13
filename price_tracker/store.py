@@ -123,11 +123,23 @@ class Store:
     def __init__(self, db_path: Path) -> None:
         self.conn = sqlite3.connect(str(db_path))
         self.conn.row_factory = sqlite3.Row
+        # WAL + NORMAL sync: writes stay durable per commit against app crashes,
+        # fsyncs get far cheaper, and readers never block the writer. We commit
+        # once per search-scan (batched by the engine) rather than per listing,
+        # so the many upserts in a cycle cost one fsync instead of ~125.
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(_SCHEMA)
         self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
+
+    def commit(self) -> None:
+        """Flush the pending transaction. The engine calls this once per
+        search-scan; the per-row write methods below deliberately do NOT commit
+        so a whole scan's writes batch into a single fsync."""
+        self.conn.commit()
 
     # -- upsert -------------------------------------------------------------
     def upsert(self, listing: Listing) -> tuple[bool, Optional[float]]:
@@ -177,7 +189,6 @@ class Store:
                 "INSERT INTO price_history (key, price, seen_at) VALUES (?,?,?)",
                 (listing.key, listing.price, now),
             )
-        self.conn.commit()
         return is_new, prev_price
 
     # -- comparables --------------------------------------------------------
@@ -245,7 +256,6 @@ class Store:
             """,
             stats,
         )
-        self.conn.commit()
         return stats
 
     def get_bucket_stats(self, bucket: str) -> Optional[sqlite3.Row]:
@@ -285,7 +295,6 @@ class Store:
             """,
             stats,
         )
-        self.conn.commit()
         return stats
 
     def get_model_price(

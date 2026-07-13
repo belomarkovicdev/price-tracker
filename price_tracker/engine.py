@@ -174,6 +174,10 @@ class Engine:
                 deal_count += 1
                 log.info("DEAL alerted: %s (%s)", listing.title, verdict.reason)
 
+        # One commit for the whole scan: all the upserts + stats updates above
+        # batch into a single fsync instead of one per listing.
+        self.store.commit()
+
         log.info(
             "[%s] %r: %d listings (%d new), %d deal(s) alerted.",
             scraper.site, search_name, len(listings), new_count, deal_count,
