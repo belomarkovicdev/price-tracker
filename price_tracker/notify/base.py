@@ -26,13 +26,13 @@ class Notification:
             ] if x
         )
         price = f"{l.price:,.0f} {l.currency}" if l.price is not None else "?"
-        median = f"{v.median:,.0f} {l.currency}" if v.median is not None else "?"
+        avg = f"{v.avg:,.0f} {l.currency}" if v.avg is not None else "?"
         return (
             f"\U0001F525 DEAL — {v.discount * 100:.0f}% below market\n"
             f"{l.title}\n"
             f"{specs}\n\n"
             f"Price: {price}\n"
-            f"Market median: {median}  (n={v.sample_size})\n"
+            f"Market avg: {avg}  (n={v.sample_size})\n"
             f"{l.url}"
         )
 
