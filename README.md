@@ -14,19 +14,26 @@ Every `poll_interval_seconds` (default 20s), for each configured search:
 
 1. **Scrape** one page of listings — politely, and behind a hard safety limit.
 2. **Store** them in SQLite, accumulating a corpus of comparables over time.
-3. **Evaluate** each listing against the **rolling window of the 50 most recent
-   comparables in its like-for-like bucket** (brand + model + 2-year band +
-   25k-km band + fuel + gearbox), using **median + MAD** (robust to outliers).
+3. **Evaluate** each listing against the **stored price stats for its
+   `(brand, model, year)`** — a single row holding the **median + MAD +
+   low-percentile** of every comparable seen. Those stats are recomputed from
+   the full sample at most **once per 24h**; each scan just reads that one row.
 4. **Alert** on Telegram for fresh listings that are clearly below market —
    with a scam/typo guard so absurdly-cheap junk is ignored.
 
 ### Why the design is the way it is
 
-- **Rolling window of last 50 (per bucket):** the average self-refreshes and
-  reflects the current market; old rows fall out automatically.
+- **Stored stats per `(brand, model, year)`, refreshed once/24h:** the median is
+  more robust than a mean but needs the whole sample to compute — so we compute
+  it during a once-a-day refresh (which already reads the full sample) and store
+  it in a single row. Every scan then reads just that one row (O(1) per listing)
+  instead of re-scanning many comparables. Best of both: robust *and* cheap.
 - **Median/MAD, not mean:** one overpriced or one scam listing can't skew it.
-- **SQLite:** standard-library (no extra dependency), survives restarts, and the
-  comparable corpus grows while we still fetch just one light page per cycle.
+- **SQLite (WAL, batched commits):** standard-library (no extra dependency), and
+  everything persists — the comparable corpus, the per-model-year stats, and
+  which searches have already been seeded. So a **restart resumes instantly**
+  from the stored corpus instead of re-scraping to rebuild it. Writes run in WAL
+  mode and commit once per scan, so a cycle costs one disk flush, not one per ad.
 - **Hardcoded circuit breaker:** never more than 60 requests/min to a site, in
   any rolling 60s window. It is deliberately **not** a config knob — it's a bug
   backstop. At the 20s cadence normal traffic is ~3 req/min, so it should never
@@ -69,10 +76,11 @@ sites:
         url: "https://www.polovniautomobili.com/auto-oglasi/pretraga?brand=140&model%5B%5D=10613&fuel%5B%5D=3400"
 ```
 
-> **Tip:** narrow, specific searches (one brand+model) fill buckets fast and give
-> meaningful averages quickly. A broad "all cars" search spreads listings across
-> many thin buckets, so it takes far longer before it can judge anything — and
-> that's by design (it won't alert on thin data).
+> **Tip:** narrow, specific searches (one brand+model) fill each
+> `(brand, model, year)` group fast and give meaningful stats quickly. A broad
+> "all cars" search spreads listings across many thin groups, so it takes far
+> longer before it can judge anything — and that's by design (it won't alert on
+> thin data, i.e. fewer than `min_samples` listings for that model-year).
 
 ## Run
 
@@ -81,7 +89,11 @@ python run.py
 ```
 
 Leave it running (24/7). It polls every 20s, stays polite, and self-heals if a
-site pushes back. Stop with Ctrl-C.
+site pushes back. Stop with Ctrl-C. On restart it resumes from the SQLite corpus
+— it won't re-scrape pages to rebuild data it already has.
+
+To run it in the cloud instead of on your machine, see **[DEPLOY.md](DEPLOY.md)**
+(ships a `Dockerfile`; steps for Railway).
 
 ## Adding another site later
 
@@ -101,12 +113,15 @@ rate-limit / circuit-breaker / block-detection plumbing is already there for it.
 run.py                     entry point
 config.yaml                poll cadence, evaluator knobs, sites & searches
 .env                       secrets (Telegram)
+Dockerfile                 container image (see DEPLOY.md)
+DEPLOY.md                  cloud deploy steps (Railway)
 price_tracker/
   config.py                load config + .env
   models.py                Listing + like-for-like bucket key
   ratelimit.py             RateLimiter + HARDCODED CircuitBreaker
-  store.py                 SQLite: listings, price history, alerts
-  evaluator.py             median/MAD rolling-window deal detection
+  store.py                 SQLite: listings, price history, alerts,
+                           per-model-year stats, seed state
+  evaluator.py             median/MAD deal detection from stored per-model stats
   engine.py                orchestration loop
   scrapers/                base + registry + polovni
   notify/                  base + telegram (+ dry-run log)
