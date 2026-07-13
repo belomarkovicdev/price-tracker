@@ -131,30 +131,18 @@ class Engine:
             log.exception("Scrape failed for search %r", search_name)
             return False
 
-        # Pass 1: store everything first, so the comparable corpus is complete
-        # before we judge anything. (Judging while still filling the store would
-        # evaluate early listings against a near-empty bucket.)
+        # Pass 1: store everything first, so the corpus is complete before we
+        # judge anything. (Judging while still filling the store would evaluate
+        # early listings against a near-empty model-year group.)
         new_count = deal_count = 0
-        touched_buckets: set[str] = set()
         touched_models: set[tuple[str, str, int]] = set()
         for listing in listings:
             is_new, _prev = self.store.upsert(listing)
             new_count += int(is_new)
-            b = listing.bucket()
-            if b is not None:
-                touched_buckets.add(b)
             if listing.brand and listing.model and listing.year:
                 touched_models.add((listing.brand, listing.model, listing.year))
 
-        # Recompute + persist the market average for every bucket we touched,
-        # from the most recent regular listings (paid ads already excluded).
-        for b in touched_buckets:
-            self.store.update_bucket_stats(
-                b, self.cfg.evaluator.window_rows,
-                self.cfg.evaluator.bottom_percentile,
-            )
-
-        # Refresh the per-(brand, model, year) average price — but at most once
+        # Refresh the per-(brand, model, year) price stats — but at most once
         # per 24h per model-year (the TTL skips the recompute if it's fresh).
         # One row per model-year, upserted — never duplicated.
         for brand, model, year in touched_models:

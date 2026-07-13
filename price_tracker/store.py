@@ -59,12 +59,10 @@ CREATE TABLE IF NOT EXISTS listings (
     status       TEXT,
     featured     INTEGER,
     image        TEXT,
-    bucket       TEXT,
     raw          TEXT,
     first_seen   REAL,
     last_seen    REAL
 );
-CREATE INDEX IF NOT EXISTS idx_listings_bucket ON listings(bucket, last_seen);
 
 CREATE TABLE IF NOT EXISTS price_history (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,29 +78,17 @@ CREATE TABLE IF NOT EXISTS alerts (
     alerted_at    REAL
 );
 
--- Persisted market average per like-for-like bucket (regular ads only).
--- Recomputed each scan; query per bucket, or GROUP BY brand/model for a
--- per-model view.
-CREATE TABLE IF NOT EXISTS market_stats (
-    bucket        TEXT PRIMARY KEY,
-    brand         TEXT,
-    model         TEXT,
-    sample_count  INTEGER,
-    median        REAL,
-    avg           REAL,
-    mad           REAL,
-    p_low         REAL,
-    min_price     REAL,
-    max_price     REAL,
-    updated_at    REAL
-);
-CREATE INDEX IF NOT EXISTS idx_market_stats_model ON market_stats(brand, model);
+-- Drop the retired market_stats table and bucket index from any pre-existing
+-- db. The deal decision now reads model_prices only; nothing queried these.
+DROP INDEX IF EXISTS idx_market_stats_model;
+DROP TABLE IF EXISTS market_stats;
+DROP INDEX IF EXISTS idx_listings_bucket;
 
--- One row per (brand, model, year) with the running average price. Unlike
--- market_stats (keyed by the fine-grained like-for-like bucket), this collapses
--- mileage/fuel/gearbox variants into a single per-model-year average. The
--- composite PRIMARY KEY guarantees we never duplicate a row for the same
--- brand+model+year — repeat sightings just update avg_price in place.
+-- One row per (brand, model, year) of price stats (median/MAD/low-percentile
+-- + avg), collapsing mileage/fuel/gearbox variants into a single per-model-year
+-- record. The composite PRIMARY KEY guarantees we never duplicate a row for the
+-- same brand+model+year — repeat sightings update it in place. This is the only
+-- stats table the deal decision reads.
 CREATE TABLE IF NOT EXISTS model_prices (
     brand        TEXT NOT NULL,
     model        TEXT NOT NULL,
@@ -214,16 +200,16 @@ class Store:
             """
             INSERT INTO listings (key, site, listing_id, search_name, url, title,
                 price, currency, brand, model, year, mileage, fuel, gearbox,
-                engine_cc, power_kw, city, status, featured, image, bucket, raw,
+                engine_cc, power_kw, city, status, featured, image, raw,
                 first_seen, last_seen)
             VALUES (:key,:site,:listing_id,:search_name,:url,:title,:price,
                 :currency,:brand,:model,:year,:mileage,:fuel,:gearbox,:engine_cc,
-                :power_kw,:city,:status,:featured,:image,:bucket,:raw,:now,:now)
+                :power_kw,:city,:status,:featured,:image,:raw,:now,:now)
             ON CONFLICT(key) DO UPDATE SET
                 search_name=excluded.search_name, url=excluded.url,
                 title=excluded.title, price=excluded.price,
                 status=excluded.status, featured=excluded.featured,
-                image=excluded.image, bucket=excluded.bucket,
+                image=excluded.image,
                 mileage=excluded.mileage, last_seen=:now
             """,
             {
@@ -236,7 +222,7 @@ class Store:
                 "gearbox": listing.gearbox, "engine_cc": listing.engine_cc,
                 "power_kw": listing.power_kw, "city": listing.city,
                 "status": listing.status, "featured": int(listing.featured),
-                "image": listing.image, "bucket": listing.bucket(),
+                "image": listing.image,
                 "raw": json.dumps(listing.raw, ensure_ascii=False), "now": now,
             },
         )
@@ -247,78 +233,6 @@ class Store:
                 (listing.key, listing.price, now),
             )
         return is_new, prev_price
-
-    # -- comparables --------------------------------------------------------
-    def recent_bucket_prices(
-        self, bucket: str, limit: int, exclude_key: Optional[str] = None
-    ) -> list[float]:
-        """Most recent `limit` comparable prices for a bucket (the rolling
-        window). Excludes the listing under evaluation so it isn't compared
-        against itself."""
-        sql = (
-            "SELECT price FROM listings "
-            "WHERE bucket = ? AND price IS NOT NULL AND status = 'active'"
-            # Includes paid + regular ads (the 'featured' flag is still recorded
-            # per listing, just not used to filter the average).
-        )
-        params: list[object] = [bucket]
-        if exclude_key:
-            sql += " AND key != ?"
-            params.append(exclude_key)
-        sql += " ORDER BY last_seen DESC LIMIT ?"
-        params.append(limit)
-        return [r["price"] for r in self.conn.execute(sql, params)]
-
-    # -- persisted market stats --------------------------------------------
-    def update_bucket_stats(
-        self, bucket: str, window: int, bottom_percentile: float = 20.0
-    ) -> Optional[dict]:
-        """Recompute the market average for a bucket from its most recent
-        `window` regular listings and upsert into market_stats. Returns the
-        stats (or None if the bucket has no priced regular listings)."""
-        prices = self.recent_bucket_prices(bucket, window)
-        if not prices:
-            return None
-        meta = self.conn.execute(
-            "SELECT brand, model FROM listings "
-            "WHERE bucket = ? ORDER BY last_seen DESC LIMIT 1",
-            (bucket,),
-        ).fetchone()
-        median = statistics.median(prices)
-        stats = {
-            "bucket": bucket,
-            "brand": meta["brand"] if meta else None,
-            "model": meta["model"] if meta else None,
-            "sample_count": len(prices),
-            "median": median,
-            "avg": statistics.fmean(prices),
-            "mad": statistics.median([abs(p - median) for p in prices]),
-            "p_low": _percentile(sorted(prices), bottom_percentile),
-            "min_price": min(prices),
-            "max_price": max(prices),
-            "updated_at": time.time(),
-        }
-        self.conn.execute(
-            """
-            INSERT INTO market_stats (bucket, brand, model, sample_count, median,
-                avg, mad, p_low, min_price, max_price, updated_at)
-            VALUES (:bucket,:brand,:model,:sample_count,:median,:avg,:mad,:p_low,
-                :min_price,:max_price,:updated_at)
-            ON CONFLICT(bucket) DO UPDATE SET
-                brand=excluded.brand, model=excluded.model,
-                sample_count=excluded.sample_count, median=excluded.median,
-                avg=excluded.avg, mad=excluded.mad, p_low=excluded.p_low,
-                min_price=excluded.min_price, max_price=excluded.max_price,
-                updated_at=excluded.updated_at
-            """,
-            stats,
-        )
-        return stats
-
-    def get_bucket_stats(self, bucket: str) -> Optional[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT * FROM market_stats WHERE bucket = ?", (bucket,)
-        ).fetchone()
 
     # -- per model+year average --------------------------------------------
     def update_model_price(

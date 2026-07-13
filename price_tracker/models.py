@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
@@ -42,33 +41,7 @@ class Listing:
         """Globally unique key across sites."""
         return f"{self.site}:{self.listing_id}"
 
-    def bucket(self) -> Optional[str]:
-        """Like-for-like comparable bucket. Two listings share a bucket only if
-        it's fair to compare their prices. Returns None when we lack the
-        attributes to compare fairly (then the listing can't be judged)."""
-        if not (self.brand and self.model and self.year and self.price):
-            return None
-        year_band = (self.year // 2) * 2                       # 2-year bins
-        if self.mileage is None:
-            mile_band = "na"
-        else:
-            mile_band = str(self.mileage // 25000)             # 25k km bins
-        fuel = (self.fuel or "na").strip().lower()
-        gb = normalize_gearbox(self.gearbox)
-        return f"{self.site}|{self.brand}|{self.model}|{year_band}|{mile_band}|{fuel}|{gb}".lower()
-
     def to_row(self) -> dict[str, Any]:
         d = asdict(self)
         d.pop("raw", None)
         return d
-
-
-def normalize_gearbox(value: Optional[str]) -> str:
-    if not value:
-        return "na"
-    v = value.strip().lower()
-    if "auto" in v or "dsg" in v or "tiptronic" in v:
-        return "auto"
-    if "manu" in v or "ručni" in v or "rucni" in v:
-        return "manual"
-    return re.sub(r"\s+", "-", v)

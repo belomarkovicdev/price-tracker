@@ -51,7 +51,6 @@ class SiteConfig:
 
 @dataclass
 class EvaluatorConfig:
-    window_rows: int = 50
     min_samples: int = 8
     mad_k: float = 1.5
     bottom_percentile: float = 20.0
@@ -87,7 +86,6 @@ def load_config(path: Path | None = None) -> Config:
 
     ev = data.get("evaluator", {}) or {}
     evaluator = EvaluatorConfig(
-        window_rows=int(ev.get("window_rows", 50)),
         min_samples=int(ev.get("min_samples", 8)),
         mad_k=float(ev.get("mad_k", 1.5)),
         bottom_percentile=float(ev.get("bottom_percentile", 20.0)),

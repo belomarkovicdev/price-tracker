@@ -13,7 +13,6 @@ poll_interval_seconds: 20
 # request-rate circuit breaker is hardcoded and NOT configurable; see
 # price_tracker/ratelimit.py.)
 evaluator:
-  window_rows: 50 # legacy: only the market_stats side-table uses this, not the per-model-year decision
   min_samples: 4 # don't judge a (brand, model, year) group until it has at least this many listings
   # MAD = median absolute deviation: the median of |price - median|, a robust
   # measure of how spread out prices are (outlier-proof, unlike stddev). A
@@ -23,7 +22,7 @@ evaluator:
   mad_k: 1.5
   bottom_percentile: 20 # ...or price sits in the bottom Nth percentile of the sample
   min_deal_discount: 0.12 # require at least this fraction below the median to alert
-  scam_floor_ratio: 0.5 # ignore prices below this fraction of median (likely scam/parts/typo)
+  scam_floor_ratio: 0.6 # ignore prices below this fraction of median (likely scam/parts/typo)
   min_price: 1000 # absolute price floor (EUR); below this is noise
 
 notify:
