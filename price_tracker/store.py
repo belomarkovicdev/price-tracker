@@ -14,6 +14,8 @@ recent N comparables" query the evaluator needs.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sqlite3
 import statistics
 import time
@@ -21,6 +23,8 @@ from pathlib import Path
 from typing import Optional
 
 from .models import Listing
+
+log = logging.getLogger(__name__)
 
 
 def _percentile(sorted_vals: list[float], pct: float) -> float:
@@ -127,8 +131,26 @@ class Store:
         # Ensure the parent dir exists (e.g. a mounted volume path like /data)
         # so sqlite can create the file there.
         db_path = Path(db_path)
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(db_path))
+        parent = db_path.parent
+        uid = getattr(os, "getuid", lambda: "n/a")()
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.error("Could not create DB dir %s: %s", parent, exc)
+        log.info(
+            "Opening DB at %s (uid=%s, dir exists=%s, dir writable=%s)",
+            db_path, uid, parent.exists(), os.access(parent, os.W_OK),
+        )
+        try:
+            self.conn = sqlite3.connect(str(db_path))
+        except sqlite3.OperationalError as exc:
+            log.error(
+                "sqlite could not open %s: %s. Running as uid=%s; dir %s "
+                "writable=%s. If on a mounted volume, the volume mount path "
+                "must equal the DB_PATH directory and be writable by this user.",
+                db_path, exc, uid, parent, os.access(parent, os.W_OK),
+            )
+            raise
         self.conn.row_factory = sqlite3.Row
         # WAL + NORMAL sync: writes stay durable per commit against app crashes,
         # fsyncs get far cheaper, and readers never block the writer. We commit
