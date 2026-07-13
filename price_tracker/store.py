@@ -93,6 +93,21 @@ CREATE TABLE IF NOT EXISTS market_stats (
     updated_at    REAL
 );
 CREATE INDEX IF NOT EXISTS idx_market_stats_model ON market_stats(brand, model);
+
+-- One row per (brand, model, year) with the running average price. Unlike
+-- market_stats (keyed by the fine-grained like-for-like bucket), this collapses
+-- mileage/fuel/gearbox variants into a single per-model-year average. The
+-- composite PRIMARY KEY guarantees we never duplicate a row for the same
+-- brand+model+year — repeat sightings just update avg_price in place.
+CREATE TABLE IF NOT EXISTS model_prices (
+    brand        TEXT NOT NULL,
+    model        TEXT NOT NULL,
+    year         INTEGER NOT NULL,
+    avg_price    REAL,
+    sample_count INTEGER,
+    updated_at   REAL,
+    PRIMARY KEY (brand, model, year)
+);
 """
 
 
@@ -228,6 +243,49 @@ class Store:
     def get_bucket_stats(self, bucket: str) -> Optional[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM market_stats WHERE bucket = ?", (bucket,)
+        ).fetchone()
+
+    # -- per model+year average --------------------------------------------
+    def update_model_price(
+        self, brand: str, model: str, year: int
+    ) -> Optional[dict]:
+        """Recompute the average price across all active, priced listings with
+        this exact brand+model+year and upsert the single row for it. Returns
+        the row (or None if there are no priced listings for it yet)."""
+        row = self.conn.execute(
+            "SELECT AVG(price) AS avg, COUNT(*) AS n FROM listings "
+            "WHERE brand = ? AND model = ? AND year = ? "
+            "AND price IS NOT NULL AND status = 'active'",
+            (brand, model, year),
+        ).fetchone()
+        if row is None or not row["n"]:
+            return None
+        stats = {
+            "brand": brand, "model": model, "year": year,
+            "avg_price": row["avg"], "sample_count": row["n"],
+            "updated_at": time.time(),
+        }
+        self.conn.execute(
+            """
+            INSERT INTO model_prices (brand, model, year, avg_price,
+                sample_count, updated_at)
+            VALUES (:brand,:model,:year,:avg_price,:sample_count,:updated_at)
+            ON CONFLICT(brand, model, year) DO UPDATE SET
+                avg_price=excluded.avg_price,
+                sample_count=excluded.sample_count,
+                updated_at=excluded.updated_at
+            """,
+            stats,
+        )
+        self.conn.commit()
+        return stats
+
+    def get_model_price(
+        self, brand: str, model: str, year: int
+    ) -> Optional[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM model_prices WHERE brand = ? AND model = ? AND year = ?",
+            (brand, model, year),
         ).fetchone()
 
     # -- alerts -------------------------------------------------------------

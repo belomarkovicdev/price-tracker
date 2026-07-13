@@ -123,12 +123,15 @@ class Engine:
         # evaluate early listings against a near-empty bucket.)
         new_count = deal_count = 0
         touched_buckets: set[str] = set()
+        touched_models: set[tuple[str, str, int]] = set()
         for listing in listings:
             is_new, _prev = self.store.upsert(listing)
             new_count += int(is_new)
             b = listing.bucket()
             if b is not None:
                 touched_buckets.add(b)
+            if listing.brand and listing.model and listing.year:
+                touched_models.add((listing.brand, listing.model, listing.year))
 
         # Recompute + persist the market average for every bucket we touched,
         # from the most recent regular listings (paid ads already excluded).
@@ -137,6 +140,11 @@ class Engine:
                 b, self.cfg.evaluator.window_rows,
                 self.cfg.evaluator.bottom_percentile,
             )
+
+        # Update the collapsed per-(brand, model, year) average price. One row
+        # per model-year, upserted — never duplicated.
+        for brand, model, year in touched_models:
+            self.store.update_model_price(brand, model, year)
 
         # Pass 2: evaluate every listing against the now-complete window.
         for listing in listings:
