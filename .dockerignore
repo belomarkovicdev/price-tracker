@@ -1,0 +1,12 @@
+# Keep secrets, local state, and cruft out of the image.
+.env
+*.db
+*.db-journal
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+README.md
+DEPLOY.md

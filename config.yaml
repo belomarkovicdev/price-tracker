@@ -1,0 +1,55 @@
+# Price-tracker configuration.
+# Secrets (Telegram token/chat) live in .env, NOT here.
+
+# How often to run a full poll cycle across all enabled searches.
+poll_interval_seconds: 20
+
+# Below-average deal detection.
+# The average/median is a ROLLING window: at evaluation time we take the most
+# recent `window_rows` comparables in the same like-for-like bucket and compute
+# stats from those. Old rows fall out of the window automatically as newer ones
+# arrive, so it self-refreshes continuously (recomputed on every check).
+# These are analysis knobs, not anti-block knobs. (The hard request-rate circuit
+# breaker is hardcoded and NOT configurable; see price_tracker/ratelimit.py.)
+evaluator:
+  window_rows: 50 # rolling window size: use the most recent N comparables
+  min_samples: 8 # don't judge a bucket until it has at least this many rows
+  mad_k: 1.5 # deal if price <= median - mad_k * MAD
+  bottom_percentile: 20 # ...or price sits in the bottom Nth percentile of the window
+  min_deal_discount: 0.12 # require at least this fraction below the median to alert
+  scam_floor_ratio: 0.5 # ignore prices below this fraction of median (likely scam/parts/typo)
+  min_price: 1000 # absolute price floor (EUR); below this is noise
+
+notify:
+  telegram:
+    enabled: true # set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in .env
+
+sites:
+  polovniautomobili:
+    enabled: true
+    # Polite spacing between HTTP requests to this site (tuning, stays well
+    # under the hardcoded circuit breaker). Randomized by +/- jitter.
+    request_delay_seconds: 1
+    jitter_seconds: 4
+    # Results are ordered newest-first, so new posts appear on page 1. We scan
+    # from page 1. Leave skip_pages at 0 normally; raise it only if you want to
+    # ignore the most-recently-bumped listings at the very top.
+    skip_pages: 0
+    # First sight of a search: fetch this many pages (from page 1) to seed the
+    # comparable corpus, so already-underpriced listings can be judged and
+    # alerted right away instead of after days of warm-up. ~25 listings/page.
+    seed_pages: 5
+    # Steady state: each cycle fetch this many pages from page 1 (the newest
+    # listings), a fixed count. Raise it if many new posts arrive between cycles.
+    scan_pages: 2
+    # Each search is a normal polovniautomobili search-results URL. Build one
+    # in your browser with the filters you want, then paste the URL here.
+    searches:
+      - name: "Passat B7 >=2011"
+        url: "https://www.polovniautomobili.com/auto-oglasi/pretraga?brand=Volkswagen&model[]=Passat+B7&sort=basic&yearFrom=2011"
+      - name: "Golf 7"
+        url: "https://www.polovniautomobili.com/auto-oglasi/pretraga?brand=Volkswagen&model[]=Golf+7&sort=basic"
+      - name: "Renault >=2014"
+        url: "https://www.polovniautomobili.com/auto-oglasi/pretraga?brand=Renault&model[]=Megane&sort=basic&yearFrom=2014"
+      # - name: "VW Golf 7 diesel manual"
+      #   url: "https://www.polovniautomobili.com/auto-oglasi/pretraga?brand=140&model%5B%5D=10613&fuel%5B%5D=3400"
