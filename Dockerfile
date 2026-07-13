@@ -16,8 +16,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # App code (see .dockerignore for what's excluded — .env, *.db, .venv, etc.).
 COPY . .
 
-# Run as a non-root user.
-RUN useradd --create-home --uid 10001 appuser && chown -R appuser /app
-USER appuser
-
+# Runs as root (the default). Railway mounts volumes owned by root, so a
+# non-root user can't create the SQLite file on the /data volume — running as
+# root is the simple, standard fix for this single-purpose worker with no
+# inbound network surface.
 CMD ["python", "run.py"]
