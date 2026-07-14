@@ -77,6 +77,13 @@ class KleinanzeigenScraper(Scraper):
         stored_attrs: Optional[Callable[[str], Optional[dict]]] = None,
     ) -> list[Listing]:
         listings: list[Listing] = []
+        # Cap detail-page fetches per cycle so a burst of new ads (e.g. 27 on
+        # first sight) doesn't fire a rapid run of requests that trips a soft
+        # block. 0 = unlimited. Over-budget new ads are simply left for a later
+        # cycle: we skip them here without storing them, so they stay "new" and
+        # get fetched next time — draining the backlog at cap/cycle.
+        cap = getattr(self.cfg, "max_detail_fetches_per_cycle", 0)
+        fetched = deferred = 0
         last_page = start_page + max(1, num_pages) - 1
         for page in range(start_page, last_page + 1):
             resp = self.get(_page_url(url, page))
@@ -94,22 +101,28 @@ class KleinanzeigenScraper(Scraper):
             if not cards:
                 break   # empty / past the last page
             for card in cards:
-                listing = self._build_listing(search_name, card, stored_attrs)
-                if listing is not None:
-                    listings.append(listing)
+                # Reuse structured attrs for ads we've already enriched; only pay
+                # a detail-page fetch on genuinely new ads.
+                attrs = stored_attrs(card["adid"]) if stored_attrs else None
+                if attrs is None:
+                    if cap and fetched >= cap:
+                        deferred += 1
+                        continue   # over budget — leave unseen for next cycle
+                    attrs = self._fetch_detail(card["href"])
+                    fetched += 1
+                listings.append(self._build_listing(search_name, card, attrs))
+        if deferred:
+            log.info(
+                "[%s] %r: deferred %d new ad(s) past the per-cycle detail cap "
+                "(%d); they'll be fetched in an upcoming cycle.",
+                self.site, search_name, deferred, cap,
+            )
         return listings
 
     def _build_listing(
-        self, search_name: str, card: dict[str, Any],
-        stored_attrs: Optional[Callable[[str], Optional[dict]]],
-    ) -> Listing | None:
+        self, search_name: str, card: dict[str, Any], attrs: dict[str, Any],
+    ) -> Listing:
         adid = card["adid"]
-        # Reuse structured attrs for ads we've already enriched; only pay for a
-        # detail-page fetch on genuinely new ads.
-        attrs = stored_attrs(adid) if stored_attrs is not None else None
-        if attrs is None:
-            attrs = self._fetch_detail(card["href"])
-
         return Listing(
             site=self.site,
             listing_id=adid,

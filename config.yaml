@@ -98,6 +98,12 @@ sites:
     seed_enabled: false
     seed_pages: 1        # unused while seed_enabled is false
     scan_pages: 1
+    # Each genuinely-new ad costs one detail-page fetch (the results page lacks
+    # the structured fields). A burst of new ads — e.g. 27 on first sight — would
+    # otherwise fire that many requests back-to-back and risk a soft block. Cap
+    # the fetches per cycle; over-budget new ads are picked up in later cycles,
+    # draining the backlog at this rate. 0 = unlimited.
+    max_detail_fetches_per_cycle: 5
     # Prices are compared per site AND per fuel (a diesel is dearer than the same
     # petrol model-year), so no cross-market or cross-fuel mixing. Build the URL
     # in your browser with the filters you want, then paste it here.
