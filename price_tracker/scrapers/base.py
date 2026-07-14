@@ -13,6 +13,7 @@ sane browser-like headers, and detects block signals. Subclasses implement only
 from __future__ import annotations
 
 import logging
+import re
 from typing import Callable, Optional
 
 import requests
@@ -24,6 +25,11 @@ from ..ratelimit import CircuitBreaker, RateLimiter
 log = logging.getLogger(__name__)
 
 _REGISTRY: dict[str, type["Scraper"]] = {}
+
+
+def _redact_proxy(url: str) -> str:
+    """Hide any user:pass@ credentials before a proxy url reaches the logs."""
+    return re.sub(r"://[^/@]+@", "://***@", url)
 
 
 def register(name: str) -> Callable[[type["Scraper"]], type["Scraper"]]:
@@ -65,6 +71,15 @@ class Scraper:
         self.limiter = RateLimiter(cfg.request_delay_seconds, cfg.jitter_seconds)
         self.session = requests.Session()
         self.session.headers.update(self.headers)
+        # Route every request through a proxy when configured. Datacenter hosts
+        # (e.g. Railway) get their IP range soft-blocked by some sites, which
+        # then return a 200 with no results; pointing this at a residential /
+        # mobile / WARP proxy egresses from a non-datacenter IP. Unset = direct.
+        if cfg.proxy_url:
+            self.session.proxies.update(
+                {"http": cfg.proxy_url, "https": cfg.proxy_url})
+            log.info("[%s] routing requests through proxy %s",
+                     cfg.name, _redact_proxy(cfg.proxy_url))
 
     # -- shared HTTP path ---------------------------------------------------
     def get(self, url: str, **kwargs) -> requests.Response:

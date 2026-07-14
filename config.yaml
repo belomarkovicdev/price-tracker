@@ -83,6 +83,14 @@ sites:
     # detail page is fetched at most once per ad, ever.
     request_delay_seconds: 5
     jitter_seconds: 4
+    # kleinanzeigen soft-blocks datacenter IPs: it answers HTTP 200 with a page
+    # that has no results container, so the scraper now raises "no results
+    # container ... (soft block?)" and backs off instead of silently logging 0
+    # listings. To get real results from a datacenter host (e.g. Railway), route
+    # this site through a residential/mobile/WARP proxy. Set it here, or leave it
+    # out and use the PROXY_URL (or PROXY_URL_KLEINANZEIGEN) env var so the
+    # endpoint/credentials stay out of the committed config. Empty = direct.
+    # proxy_url: "http://user:pass@host:port"
     # Results are sorted newest-first, so new posts land on page 1.
     skip_pages: 0
     # No seeding: we don't want to bulk-import history, just watch for new posts
