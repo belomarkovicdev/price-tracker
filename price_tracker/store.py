@@ -223,7 +223,20 @@ class Store:
                 title=excluded.title, price=excluded.price,
                 status=excluded.status, featured=excluded.featured,
                 image=excluded.image,
-                mileage=excluded.mileage, last_seen=:now
+                mileage=excluded.mileage, last_seen=:now,
+                -- Refresh/backfill the structured comparables, but never wipe a
+                -- stored value with an incoming NULL: polovni always carries
+                -- these on the list page (so they stay current), while
+                -- kleinanzeigen reuses once-fetched detail attrs and must keep
+                -- them if a later scan lacks them. COALESCE = keep old on NULL.
+                fuel=COALESCE(excluded.fuel, fuel),
+                brand=COALESCE(excluded.brand, brand),
+                model=COALESCE(excluded.model, model),
+                year=COALESCE(excluded.year, year),
+                gearbox=COALESCE(excluded.gearbox, gearbox),
+                engine_cc=COALESCE(excluded.engine_cc, engine_cc),
+                power_kw=COALESCE(excluded.power_kw, power_kw),
+                city=COALESCE(excluded.city, city)
             """,
             {
                 "key": listing.key, "site": listing.site,
