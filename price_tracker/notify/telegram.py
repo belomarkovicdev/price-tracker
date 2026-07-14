@@ -20,19 +20,23 @@ class LogNotifier(Notifier):
         log.info("ALERT (dry-run):\n%s", note.as_text())
         return True
 
+    def send_text(self, text: str) -> bool:
+        log.info("STATUS (dry-run): %s", text)
+        return True
+
 
 class TelegramNotifier(Notifier):
     def __init__(self, cfg: TelegramConfig) -> None:
         self.cfg = cfg
         self._url = f"https://api.telegram.org/bot{cfg.bot_token}/sendMessage"
 
-    def send(self, note: Notification) -> bool:
+    def _post(self, text: str) -> bool:
         try:
             resp = requests.post(
                 self._url,
                 json={
                     "chat_id": self.cfg.chat_id,
-                    "text": note.as_text(),
+                    "text": text,
                     "disable_web_page_preview": False,
                 },
                 timeout=20,
@@ -45,6 +49,12 @@ class TelegramNotifier(Notifier):
         except requests.RequestException as exc:
             log.error("Telegram send error: %s", exc)
             return False
+
+    def send(self, note: Notification) -> bool:
+        return self._post(note.as_text())
+
+    def send_text(self, text: str) -> bool:
+        return self._post(text)
 
 
 def build_notifier(cfg: TelegramConfig) -> Notifier:

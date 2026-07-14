@@ -19,8 +19,10 @@ Every `poll_interval_seconds` (default 20s), for each configured search:
 2. **Store** them in SQLite, accumulating a corpus of comparables over time.
 3. **Evaluate** each listing against the **stored price stats for its
    `(site, brand, model, year, fuel)`** — a single row holding the **median +
-   MAD + low-percentile** of every comparable seen. Those stats are recomputed
-   from the full sample at most **once per 24h**; each scan just reads that row.
+   MAD + low-percentile** of every comparable seen. Each scan just reads that
+   row; the row itself is force-recomputed **every hour** (see *Hourly median
+   refresh* below) for groups that saw a listing in the past hour, so the median
+   tracks recent listings.
 4. **Alert** on Telegram for fresh listings that are clearly below market —
    with a scam/typo guard so absurdly-cheap junk is ignored.
 
@@ -33,13 +35,32 @@ dearer — lumping them together would make every petrol car look cheap against 
 diesel-inflated median. A listing is only judged once its own group has at least
 `min_samples` comparables.
 
+### Hourly median refresh
+
+Once an hour the engine force-recomputes the stored median/MAD/low-percentile
+for every `(site, brand, model, year, fuel)` group that received a listing in
+the past hour, and posts a **Telegram heartbeat** (`🔄 Updating price database…`
+→ `✅ … updated`) around it. The window only decides *which* groups to refresh;
+each median is still computed over that group's **full** active corpus, because
+one hour of listings alone is too thin to be a robust median. The cadence is
+`median_refresh_interval_seconds` in `config.yaml` (default `3600`; `0`
+disables it).
+
+Because the tracker is meant to run 24/7, this needs no external scheduler — the
+always-running loop does it. If you *don't* keep `run.py` running, you can drive
+the same refresh on demand or from Windows Task Scheduler / cron:
+
+```bash
+python -m price_tracker.maintenance
+```
+
 ### Why the design is the way it is
 
-- **Stored stats per `(site, brand, model, year, fuel)`, refreshed once/24h:** the median is
+- **Stored stats per `(site, brand, model, year, fuel)`, refreshed hourly:** the median is
   more robust than a mean but needs the whole sample to compute — so we compute
-  it during a once-a-day refresh (which already reads the full sample) and store
-  it in a single row. Every scan then reads just that one row (O(1) per listing)
-  instead of re-scanning many comparables. Best of both: robust *and* cheap.
+  it in the hourly refresh (which reads the full sample once) and store it in a
+  single row. Every scan then reads just that one row (O(1) per listing) instead
+  of re-scanning many comparables. Best of both: robust *and* cheap.
 - **Median/MAD, not mean:** one overpriced or one scam listing can't skew it.
 - **SQLite (WAL, batched commits):** standard-library (no extra dependency), and
   everything persists — the comparable corpus, the per-model-year stats, and

@@ -4,10 +4,17 @@
 # How often to run a full poll cycle across all enabled searches.
 poll_interval_seconds: 20
 
+# How often the engine force-refreshes the stored market medians and posts a
+# Telegram "DB is being updated" heartbeat. Each refresh recomputes the median
+# for every (site, brand, model, year, fuel) group that received a listing in
+# this window — over that group's full corpus, not just the window's slice.
+# Default hourly. Set to 0 to disable (the per-scan 24h refresh still applies).
+median_refresh_interval_seconds: 3600
+
 # Below-average deal detection.
 # For each (brand, model, year) we keep a SINGLE stored row of price stats
 # (median + MAD + low-percentile), recomputed from the full set of comparables
-# at most once per 24h. Evaluation reads that one row and flags a listing whose
+# every hour (see median_refresh_interval_seconds). Evaluation reads that one row and flags a listing whose
 # price is meaningfully below the median (see store.update_model_price +
 # evaluator.py). These are analysis knobs, not anti-block knobs. (The hard
 # request-rate circuit breaker is hardcoded and NOT configurable; see
