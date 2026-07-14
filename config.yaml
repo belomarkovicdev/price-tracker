@@ -16,6 +16,12 @@ median_refresh_interval_seconds: 3600
 # market rather than the whole history. Default 24h.
 retention_window_seconds: 86400
 
+# Only write a group's median to the db when it has MORE THAN this many
+# comparables in the window (default 11 -> "more than 10"). Thin groups are left
+# out entirely, so model_prices only holds well-sampled medians. This gates DB
+# persistence only; whether a listing can be ALERTED on uses evaluator.min_samples.
+median_min_samples: 11
+
 # Below-average deal detection.
 # For each (brand, model, year, fuel) group we keep a SINGLE stored row of price
 # stats (median + MAD + low-percentile), rebuilt hourly from the in-memory buffer
