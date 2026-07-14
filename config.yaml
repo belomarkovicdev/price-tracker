@@ -61,6 +61,7 @@ sites:
     # First sight of a search: fetch this many pages (from page 1) to seed the
     # comparable corpus, so already-underpriced listings can be judged and
     # alerted right away instead of after days of warm-up. ~25 listings/page.
+    seed_enabled: false
     seed_pages: 8
     # Steady state: each cycle fetch this many pages from page 1 (the newest
     # listings), a fixed count. Raise it if many new posts arrive between cycles.
