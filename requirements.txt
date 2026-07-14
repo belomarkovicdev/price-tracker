@@ -1,2 +1,5 @@
 requests>=2.31
 PyYAML>=6.0
+# SOCKS proxy support for requests (enables socks5h:// PROXY_URL, e.g. a
+# Cloudflare WARP sidecar). Harmless when no proxy is configured.
+PySocks>=1.7.1
