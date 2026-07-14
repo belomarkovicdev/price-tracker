@@ -47,6 +47,10 @@ class SiteConfig:
     proxy_url: str = ""      # route this site's requests through a proxy (e.g. a
                              # residential/mobile/WARP egress so a datacenter IP
                              # isn't soft-blocked). Empty = direct connection.
+    max_detail_fetches_per_cycle: int = 0
+                             # cap detail-page fetches per cycle so a burst of new
+                             # ads doesn't fire a rapid run of requests. 0 =
+                             # unlimited. Over-budget new ads defer to next cycle.
 
     @property
     def start_page(self) -> int:
@@ -134,6 +138,8 @@ def load_config(path: Path | None = None) -> Config:
                 seed_enabled=bool(cfg.get("seed_enabled", True)),
                 searches=searches,
                 proxy_url=str(proxy_url).strip(),
+                max_detail_fetches_per_cycle=max(
+                    0, int(cfg.get("max_detail_fetches_per_cycle", 0))),
             )
         )
 
