@@ -4,22 +4,23 @@
 # How often to run a full poll cycle across all enabled searches.
 poll_interval_seconds: 20
 
-# How often the engine prunes old listings, recomputes the stored market
-# medians, and posts a Telegram "DB is being updated" heartbeat. Default hourly.
-# Set to 0 to disable the periodic refresh.
+# How often the engine prunes the in-memory buffer, rebuilds the stored market
+# medians from it, and posts a Telegram "DB is being updated" heartbeat. Default
+# hourly. Set to 0 to disable the periodic refresh.
 median_refresh_interval_seconds: 3600
 
-# Rolling window. Listings not seen within this long are pruned from the db, and
-# each median is recomputed over what's left. This keeps the db bounded (one db
-# file per site, in the volume set by DB_DIR / DB_PATH's folder) and ties the
-# median to the recent market rather than the whole history. Default 24h.
+# Rolling window. Listings not seen within this long age out of the in-memory
+# buffer, and each median is computed over what's left. Individual listings are
+# never written to disk — only the aggregate medians (one db file per site, in
+# the volume set by DB_DIR / DB_PATH's folder). Ties the median to the recent
+# market rather than the whole history. Default 24h.
 retention_window_seconds: 86400
 
 # Below-average deal detection.
-# For each (brand, model, year) we keep a SINGLE stored row of price stats
-# (median + MAD + low-percentile), recomputed from the full set of comparables
-# every hour (see median_refresh_interval_seconds). Evaluation reads that one row and flags a listing whose
-# price is meaningfully below the median (see store.update_model_price +
+# For each (brand, model, year, fuel) group we keep a SINGLE stored row of price
+# stats (median + MAD + low-percentile), rebuilt hourly from the in-memory buffer
+# (see median_refresh_interval_seconds). A listing is judged against its group's
+# median live from the buffer and flagged if meaningfully below it (see
 # evaluator.py). These are analysis knobs, not anti-block knobs. (The hard
 # request-rate circuit breaker is hardcoded and NOT configurable; see
 # price_tracker/ratelimit.py.)

@@ -24,22 +24,30 @@ These are read from the environment directly (`config.py` uses
 `os.environ`), so **no `.env` file is needed in the container**. If Telegram
 vars are missing the app still runs and logs alerts in dry-run mode.
 
-## 3. Persist the corpus across redeploys (recommended)
+## 3. Persist the medians across redeploys (recommended)
 
-By default the SQLite dbs live inside the container and are **wiped on every
-redeploy**, forcing a full re-seed. To keep the accumulated data and medians:
+The db is small now — it holds only the **medians** (`model_prices`) and the
+alert-dedup log, not individual listings (those live in memory). Without a
+volume it's wiped on every redeploy, so the last-known medians are lost and the
+tracker starts querying from scratch until the in-memory buffer refills. To keep
+the medians and the alert log:
 
 1. Service → add a **Volume**, mount path **`/data`**.
 2. Service → **Variables** → add `DB_DIR` = **`/data`**.
 
 The app keeps **one db file per site** in `DB_DIR` (`/data/polovniautomobili.db`,
-and `kleinanzeigen.db` if you re-enable it), so redeploys reuse the existing data
-instead of re-scraping. Leave `DB_DIR` unset to keep the dbs next to the code
-(ephemeral).
+and `kleinanzeigen.db` if you re-enable it). Leave `DB_DIR` unset to keep the dbs
+next to the code (ephemeral).
 
+> Note: the per-listing sample is **in memory**, so every restart/redeploy
+> re-seeds to refill it regardless of the volume — expect a scraping burst and a
+> short warm-up before medians are fully current. The volume only preserves the
+> aggregate medians + alert log.
+>
 > Back-compat: an older `DB_PATH=/data/price_tracker.db` still works — its
 > **folder** (`/data`) is used as the volume, and the existing
-> `price_tracker.db` is adopted as `polovniautomobili.db` automatically.
+> `price_tracker.db` is adopted as `polovniautomobili.db` automatically (its old
+> per-listing tables are dropped and the file vacuumed).
 
 ## 4. Deploy
 

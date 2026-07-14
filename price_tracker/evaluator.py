@@ -1,9 +1,9 @@
 """Decide whether a listing is a below-average deal worth alerting on.
 
 Approach (robust to outliers and scams):
-  * Each brand+model+year has a single stored row of price stats (median, MAD,
-    low-percentile), recomputed hourly from the full sample (see
-    store.update_model_price). Evaluation reads just that one row.
+  * Each group's price stats (median, MAD, low-percentile) are computed from the
+    in-memory buffer (see buffer.ListingBuffer + store.price_stats) and passed in.
+    The hourly refresh persists the same stats to model_prices.
   * Use MEDIAN + MAD, not mean/stddev — one absurd listing can't skew the median.
   * A listing is a deal when its price is meaningfully below the pack:
         price <= median - mad_k * MAD        (statistically cheap), OR
