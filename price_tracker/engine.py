@@ -4,7 +4,8 @@ Each cycle (every poll_interval_seconds):
   for each enabled site, for each configured search:
     1. scrape one page of listings (polite + circuit-breaker protected)
     2. upsert into the store (accumulates the comparable corpus)
-    3. evaluate each listing against its rolling-window bucket
+    3. evaluate each listing against the stored per-(site, brand, model, year,
+       fuel) price stats
     4. alert on fresh below-average deals via Telegram
 
 Block/circuit-breaker events are handled softly: we log, skip the site for this
@@ -89,7 +90,7 @@ class Engine:
                 # those inflate the average and don't carry new posts.
                 start_page = site.start_page
                 was_seeded = seed_key in self._seeded
-                if not was_seeded:
+                if site.seed_enabled and not was_seeded:
                     # First sight ever (across runs): seed a wider range to build
                     # the corpus so already-underpriced listings can be judged
                     # right away.
@@ -100,26 +101,30 @@ class Engine:
                         start_page + num_pages - 1, site.skip_pages,
                     )
                 else:
-                    # Steady state: scan the first few post-skip pages, where
-                    # new regular posts appear.
+                    # Steady state (or a seed-disabled site that only ever
+                    # watches for new posts): scan the first few post-skip pages,
+                    # where new regular posts appear.
                     num_pages = site.scan_pages
-                seeded = self._process_search(
-                    scraper, search.name, search.url, start_page, num_pages
+                ok = self._process_search(
+                    scraper, site.name, search.name, search.url,
+                    start_page, num_pages,
                 )
                 # Record the seed only on the first successful wide fetch, and
                 # persist it so future restarts skip re-seeding this search.
-                if seeded and not was_seeded:
+                if site.seed_enabled and ok and not was_seeded:
                     self._seeded.add(seed_key)
                     self.store.mark_seeded(seed_key)
 
     def _process_search(
-        self, scraper, search_name: str, url: str,
+        self, scraper, site_name: str, search_name: str, url: str,
         start_page: int, num_pages: int,
     ) -> bool:
         """Returns True if the fetch succeeded (so it can be marked seeded)."""
         try:
             listings = scraper.fetch_listings(
-                search_name, url, start_page, num_pages
+                search_name, url, start_page, num_pages,
+                stored_attrs=lambda lid: self.store.get_listing_attrs(
+                    f"{site_name}:{lid}"),
             )
         except CircuitBreakerTripped as exc:
             log.error("%s — skipping site this cycle.", exc)
@@ -133,32 +138,36 @@ class Engine:
 
         # Pass 1: store everything first, so the corpus is complete before we
         # judge anything. (Judging while still filling the store would evaluate
-        # early listings against a near-empty model-year group.)
+        # early listings against a near-empty group.)
         new_count = deal_count = 0
-        touched_models: set[tuple[str, str, int]] = set()
+        touched: set[tuple[str, str, int, str]] = set()
         for listing in listings:
             is_new, _prev = self.store.upsert(listing)
             new_count += int(is_new)
-            if listing.brand and listing.model and listing.year:
-                touched_models.add((listing.brand, listing.model, listing.year))
+            if listing.brand and listing.model and listing.year and listing.fuel:
+                touched.add(
+                    (listing.brand, listing.model, listing.year, listing.fuel))
 
-        # Refresh the per-(brand, model, year) price stats — but at most once
-        # per 24h per model-year (the TTL skips the recompute if it's fresh).
-        # One row per model-year, upserted — never duplicated.
-        for brand, model, year in touched_models:
+        # Refresh the per-(brand, model, year, fuel) price stats — but at most
+        # once per 24h per group (the TTL skips the recompute if it's fresh).
+        # Scoped to this site so markets are never mixed. One row per group,
+        # upserted — never duplicated.
+        for brand, model, year, fuel in touched:
             self.store.update_model_price(
-                brand, model, year,
+                site_name, brand, model, year, fuel,
                 bottom_percentile=self.cfg.evaluator.bottom_percentile,
                 ttl_seconds=_AVG_TTL_SECONDS,
             )
 
         # Pass 2: evaluate each listing against the single stored average price
-        # for its brand+model+year.
+        # for its site+brand+model+year+fuel group.
         for listing in listings:
-            if not (listing.brand and listing.model and listing.year):
+            if not (listing.brand and listing.model and listing.year
+                    and listing.fuel):
                 continue
             row = self.store.get_model_price(
-                listing.brand, listing.model, listing.year
+                site_name, listing.brand, listing.model, listing.year,
+                listing.fuel,
             )
             if row is None:
                 continue

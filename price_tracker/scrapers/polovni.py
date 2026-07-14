@@ -38,6 +38,7 @@ class PolovniScraper(Scraper):
     def fetch_listings(
         self, search_name: str, url: str,
         start_page: int = 1, num_pages: int = 1,
+        stored_attrs=None,   # unused: the list page already carries full details
     ) -> list[Listing]:
         listings: list[Listing] = []
         last_page = start_page + max(1, num_pages) - 1

@@ -84,22 +84,30 @@ DROP INDEX IF EXISTS idx_market_stats_model;
 DROP TABLE IF EXISTS market_stats;
 DROP INDEX IF EXISTS idx_listings_bucket;
 
--- One row per (brand, model, year) of price stats (median/MAD/low-percentile
--- + avg), collapsing mileage/fuel/gearbox variants into a single per-model-year
+-- One row per (site, brand, model, year, fuel) of price stats (median/MAD/
+-- low-percentile + avg), collapsing mileage/gearbox variants into a single
 -- record. The composite PRIMARY KEY guarantees we never duplicate a row for the
--- same brand+model+year — repeat sightings update it in place. This is the only
--- stats table the deal decision reads.
+-- same group — repeat sightings update it in place. This is the only stats
+-- table the deal decision reads.
+--
+-- `site` is in the key because prices are NOT comparable across markets (a
+-- German Kleinanzeigen car and a Serbian polovniautomobili one price entirely
+-- differently), and `fuel` because within a market diesel and petrol of the
+-- same model-year sit at different price levels — comparing across fuel would
+-- flag every petrol car as a "deal" against a diesel-inflated median.
 CREATE TABLE IF NOT EXISTS model_prices (
+    site         TEXT NOT NULL,
     brand        TEXT NOT NULL,
     model        TEXT NOT NULL,
     year         INTEGER NOT NULL,
+    fuel         TEXT NOT NULL,
     avg_price    REAL,
     median       REAL,
     mad          REAL,
     p_low        REAL,
     sample_count INTEGER,
     updated_at   REAL,
-    PRIMARY KEY (brand, model, year)
+    PRIMARY KEY (site, brand, model, year, fuel)
 );
 
 -- Which searches have already been seeded (wide first-sight fetch). Persisted
@@ -160,20 +168,25 @@ class Store:
         # so the many upserts in a cycle cost one fsync instead of ~125.
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
+        # Migrate any old model_prices before the schema recreates it (see below).
+        self._migrate_model_prices()
         self.conn.executescript(_SCHEMA)
-        # Additive migration for DBs created before model_prices grew its robust
-        # stat columns. CREATE TABLE IF NOT EXISTS won't add columns to an
-        # existing table, so backfill any that are missing.
-        self._add_columns("model_prices",
-                          {"median": "REAL", "mad": "REAL", "p_low": "REAL"})
         self.conn.commit()
 
-    def _add_columns(self, table: str, cols: dict[str, str]) -> None:
-        existing = {r["name"]
-                    for r in self.conn.execute(f"PRAGMA table_info({table})")}
-        for name, decl in cols.items():
-            if name not in existing:
-                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    def _migrate_model_prices(self) -> None:
+        """model_prices is now keyed by (site, brand, model, year, fuel). Older
+        dbs keyed it by (brand, model, year) only. SQLite can't ALTER a primary
+        key, but this table is a derived cache (recomputed from `listings` on the
+        next scan), so the safe migration is simply to drop the stale-schema
+        table and let _SCHEMA recreate it with the new key."""
+        cols = {r["name"]
+                for r in self.conn.execute("PRAGMA table_info(model_prices)")}
+        if cols and "site" not in cols:
+            log.info(
+                "Migrating model_prices to (site, brand, model, year, fuel) "
+                "schema — dropping the stale cache; it recomputes on next scan."
+            )
+            self.conn.execute("DROP TABLE model_prices")
 
     def close(self) -> None:
         self.conn.close()
@@ -234,40 +247,43 @@ class Store:
             )
         return is_new, prev_price
 
-    # -- per model+year average --------------------------------------------
+    # -- per (site, model, year, fuel) average -----------------------------
     def update_model_price(
-        self, brand: str, model: str, year: int,
+        self, site: str, brand: str, model: str, year: int, fuel: str,
         bottom_percentile: float = 20.0,
         ttl_seconds: Optional[float] = None,
     ) -> Optional[dict]:
         """Recompute the price stats (avg, median, MAD, low-percentile) across
-        all active, priced listings with this exact brand+model+year and upsert
-        the single row for it. Returns the row (or None if there are no priced
-        listings for it yet).
+        all active, priced listings with this exact site+brand+model+year+fuel
+        and upsert the single row for it. Returns the row (or None if there are
+        no priced listings for it yet).
 
-        The whole sample is read here — this is the one place that needs it —
-        so the stored median/MAD are as robust as a live computation. Evaluation
-        then reads just this one row.
+        Scoping to `site` keeps markets from being mixed (see the schema note),
+        and to `fuel` keeps diesel and petrol of the same model-year in separate
+        pools. The whole sample is read here — this is the one place that needs
+        it — so the stored median/MAD are as robust as a live computation.
+        Evaluation then reads just this one row.
 
         If ttl_seconds is given and the stored row was refreshed more recently
         than that, the recompute is skipped and the existing row is returned
         unchanged — so the stats refresh at most once per ttl (e.g. daily)."""
         if ttl_seconds is not None:
-            existing = self.get_model_price(brand, model, year)
+            existing = self.get_model_price(site, brand, model, year, fuel)
             if (existing is not None and existing["updated_at"] is not None
                     and time.time() - existing["updated_at"] < ttl_seconds):
                 return dict(existing)
         prices = [r["price"] for r in self.conn.execute(
             "SELECT price FROM listings "
-            "WHERE brand = ? AND model = ? AND year = ? "
-            "AND price IS NOT NULL AND status = 'active'",
-            (brand, model, year),
+            "WHERE site = ? AND brand = ? AND model = ? AND year = ? "
+            "AND fuel = ? AND price IS NOT NULL AND status = 'active'",
+            (site, brand, model, year, fuel),
         )]
         if not prices:
             return None
         median = statistics.median(prices)
         stats = {
-            "brand": brand, "model": model, "year": year,
+            "site": site, "brand": brand, "model": model, "year": year,
+            "fuel": fuel,
             "avg_price": statistics.fmean(prices),
             "median": median,
             "mad": statistics.median([abs(p - median) for p in prices]),
@@ -277,11 +293,11 @@ class Store:
         }
         self.conn.execute(
             """
-            INSERT INTO model_prices (brand, model, year, avg_price, median,
-                mad, p_low, sample_count, updated_at)
-            VALUES (:brand,:model,:year,:avg_price,:median,:mad,:p_low,
-                :sample_count,:updated_at)
-            ON CONFLICT(brand, model, year) DO UPDATE SET
+            INSERT INTO model_prices (site, brand, model, year, fuel, avg_price,
+                median, mad, p_low, sample_count, updated_at)
+            VALUES (:site,:brand,:model,:year,:fuel,:avg_price,:median,:mad,
+                :p_low,:sample_count,:updated_at)
+            ON CONFLICT(site, brand, model, year, fuel) DO UPDATE SET
                 avg_price=excluded.avg_price, median=excluded.median,
                 mad=excluded.mad, p_low=excluded.p_low,
                 sample_count=excluded.sample_count,
@@ -292,12 +308,24 @@ class Store:
         return stats
 
     def get_model_price(
-        self, brand: str, model: str, year: int
+        self, site: str, brand: str, model: str, year: int, fuel: str
     ) -> Optional[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT * FROM model_prices WHERE brand = ? AND model = ? AND year = ?",
-            (brand, model, year),
+            "SELECT * FROM model_prices WHERE site = ? AND brand = ? "
+            "AND model = ? AND year = ? AND fuel = ?",
+            (site, brand, model, year, fuel),
         ).fetchone()
+
+    def get_listing_attrs(self, key: str) -> Optional[dict]:
+        """The structured car attributes we already stored for a listing, or
+        None if we've never seen it. Lets a scraper reuse a known ad's details
+        (e.g. from an earlier detail-page fetch) instead of fetching them again."""
+        row = self.conn.execute(
+            "SELECT brand, model, year, fuel, mileage, gearbox, power_kw, "
+            "engine_cc, city FROM listings WHERE key = ?",
+            (key,),
+        ).fetchone()
+        return dict(row) if row is not None else None
 
     # -- seed state ---------------------------------------------------------
     def seeded_keys(self) -> set[str]:

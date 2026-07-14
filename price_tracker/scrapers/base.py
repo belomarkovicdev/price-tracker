@@ -13,7 +13,7 @@ sane browser-like headers, and detects block signals. Subclasses implement only
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from typing import Callable, Optional
 
 import requests
 
@@ -89,8 +89,15 @@ class Scraper:
     def fetch_listings(
         self, search_name: str, url: str,
         start_page: int = 1, num_pages: int = 1,
+        stored_attrs: Optional[Callable[[str], Optional[dict]]] = None,
     ) -> list[Listing]:
         """Return listings for a search, fetching `num_pages` pages starting at
         `start_page`. The engine skips the leading paid pages by starting deeper,
-        and seeds a wider range on first run."""
+        and seeds a wider range on first run.
+
+        `stored_attrs`, if given, maps a site-local listing id to the structured
+        attributes we already have for it (or None if never seen). A scraper
+        whose list page lacks structured fields — Kleinanzeigen only carries them
+        on each ad's detail page — uses this to fetch a detail page only for
+        genuinely new ads, reusing stored details for ones we already know."""
         raise NotImplementedError

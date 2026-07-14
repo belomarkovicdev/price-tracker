@@ -41,6 +41,8 @@ class SiteConfig:
     skip_pages: int          # leading pages to never fetch (paid "members-first")
     seed_pages: int          # regular pages to fetch on first sight (build corpus)
     scan_pages: int          # regular pages to fetch each steady-state cycle
+    seed_enabled: bool       # if False, never seed — only ever the steady-state
+                             # scan (watch for new posts, build the corpus slowly)
     searches: list[SearchConfig]
 
     @property
@@ -117,6 +119,7 @@ def load_config(path: Path | None = None) -> Config:
                 skip_pages=max(0, int(cfg.get("skip_pages", 5))),
                 seed_pages=max(1, int(cfg.get("seed_pages", 5))),
                 scan_pages=max(1, int(cfg.get("scan_pages", 2))),
+                seed_enabled=bool(cfg.get("seed_enabled", True)),
                 searches=searches,
             )
         )

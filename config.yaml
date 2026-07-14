@@ -73,3 +73,26 @@ sites:
         url: "https://www.polovniautomobili.com/auto-oglasi/pretraga?brand=%C5%A0koda&model[]=Fabia,Kodiaq,Rapid,Octavia,Roomster,Superb,Yeti&sort=basic&yearFrom=2010&yearTo=2017"
       - name: "VW"
         url: "https://www.polovniautomobili.com/auto-oglasi/pretraga?brand=Volkswagen&model[]=Golf+7,Golf+6,Golf+5,Passat+B7,Passat+B6,Passat+B7+Alltrack,Passat+B8+Alltrack,Passat+B8,Passat+CC,Polo,Tiguan,Touareg&sort=basic&yearFrom=2010&yearTo=2017"
+
+  kleinanzeigen:
+    enabled: true
+    # German classifieds. Server-rendered HTML; the results cards carry only
+    # title/price/mileage/EZ, so the structured fields (Marke, Modell,
+    # Kraftstoffart, Erstzulassung) are read from each ad's detail page — but
+    # ONLY for ads we've never seen. Known ads reuse their stored details, so a
+    # detail page is fetched at most once per ad, ever.
+    request_delay_seconds: 5
+    jitter_seconds: 4
+    # Results are sorted newest-first, so new posts land on page 1.
+    skip_pages: 0
+    # No seeding: we don't want to bulk-import history, just watch for new posts
+    # and grow the comparable corpus organically. Each cycle scans page 1 only.
+    seed_enabled: false
+    seed_pages: 1        # unused while seed_enabled is false
+    scan_pages: 1
+    # Prices are compared per site AND per fuel (a diesel is dearer than the same
+    # petrol model-year), so no cross-market or cross-fuel mixing. Build the URL
+    # in your browser with the filters you want, then paste it here.
+    searches:
+      - name: "Aichach ≤2000 EZ 2009+"
+        url: "https://www.kleinanzeigen.de/s-autos/aichach/preis:2000:/c216l7190r100+autos.ez_i:2009%2C"
