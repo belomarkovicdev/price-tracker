@@ -22,10 +22,6 @@ from .store import Store
 
 log = logging.getLogger(__name__)
 
-# Only compute a group's median once it has MORE THAN 4 comparables in the
-# window; `min_rows` is the minimum count, so "more than 4" is 5.
-_MIN_ROWS_TO_UPDATE = 5
-
 
 def refresh_medians(
     store: Store,
@@ -34,11 +30,12 @@ def refresh_medians(
     bottom_percentile: float,
     window_seconds: float = 24 * 3600.0,
     announce: bool = True,
-    min_rows: int = _MIN_ROWS_TO_UPDATE,
+    min_rows: int = 11,
 ) -> tuple[int, int, int]:
     """Prune `buffer` to the rolling window, then rebuild `store`'s medians from
-    it (groups with >= `min_rows` prices). If `announce`, bracket it with
-    Telegram status messages. Returns (groups_written, prices_used, pruned)."""
+    it (only groups with at least `min_rows` prices; default 11 → "more than
+    10"). If `announce`, bracket it with Telegram status messages. Returns
+    (groups_written, prices_used, pruned)."""
     hours = window_seconds / 3600.0
     if announce:
         notifier.send_text(

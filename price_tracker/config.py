@@ -89,6 +89,11 @@ class Config:
     # median is computed over what's left. Default 24h. Keeps the db bounded and
     # the median tied to the recent market rather than the whole history.
     retention_window_seconds: float = 24 * 3600.0
+    # Only write a group's median to the db when it has MORE THAN this many
+    # comparables in the window (default 11 -> "more than 10"). Thin groups are
+    # left out entirely. This gates DB persistence only; alerting uses
+    # evaluator.min_samples.
+    median_min_samples: int = 11
     # Volume directory holding one db file per site (polovniautomobili.db,
     # kleinanzeigen.db, …). Adding a site never touches another's data.
     db_dir: Path = field(default=ROOT)
@@ -162,5 +167,6 @@ def load_config(path: Path | None = None) -> Config:
             data.get("median_refresh_interval_seconds", 3600)),
         retention_window_seconds=float(
             data.get("retention_window_seconds", 24 * 3600)),
+        median_min_samples=int(data.get("median_min_samples", 11)),
         db_dir=db_dir,
     )
