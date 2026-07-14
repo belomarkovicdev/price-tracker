@@ -16,13 +16,13 @@ model-year (diesel sits higher, so mixing them would flag every petrol as a
 Every `poll_interval_seconds` (default 20s), for each configured search:
 
 1. **Scrape** one page of listings — politely, and behind a hard safety limit.
-2. **Store** them in SQLite, accumulating a corpus of comparables over time.
+2. **Store** them in SQLite — a **rolling window** of recent comparables (see
+   *Rolling window* below), not an ever-growing archive.
 3. **Evaluate** each listing against the **stored price stats for its
    `(site, brand, model, year, fuel)`** — a single row holding the **median +
-   MAD + low-percentile** of every comparable seen. Each scan just reads that
-   row; the row itself is force-recomputed **every hour** (see *Hourly median
-   refresh* below) for groups that saw a listing in the past hour, so the median
-   tracks recent listings.
+   MAD + low-percentile** of its group. Each scan just reads that row; the row
+   itself is recomputed **every hour** (see *Rolling window* below), so the
+   median tracks the recent market.
 4. **Alert** on Telegram for fresh listings that are clearly below market —
    with a scam/typo guard so absurdly-cheap junk is ignored.
 
@@ -35,37 +35,51 @@ dearer — lumping them together would make every petrol car look cheap against 
 diesel-inflated median. A listing is only judged once its own group has at least
 `min_samples` comparables.
 
-### Hourly median refresh
+### Rolling window
 
-Once an hour the engine force-recomputes the stored median/MAD/low-percentile
-for every `(site, brand, model, year, fuel)` group that received a listing in
-the past hour, and posts a **Telegram heartbeat** (`🔄 Updating price database…`
-→ `✅ … updated`) around it. The window only decides *which* groups to refresh;
-each median is still computed over that group's **full** active corpus, because
-one hour of listings alone is too thin to be a robust median. The cadence is
-`median_refresh_interval_seconds` in `config.yaml` (default `3600`; `0`
-disables it).
+The db is a **rolling window, not an archive.** Once an hour the engine:
+
+1. **prunes** every listing not seen within `retention_window_seconds`
+   (default 24h), so the file stays bounded to about one window of data;
+2. **recomputes** the stored median/MAD/low-percentile for each group that has
+   **more than 4** comparables left in the window; and
+3. posts a **Telegram heartbeat** (`🔄 Updating price database…` → `✅ … updated`)
+   around the pass.
+
+So the median reflects the recent market, and the db doesn't grow without bound.
+Cadence is `median_refresh_interval_seconds` (default `3600`; `0` disables it);
+the window is `retention_window_seconds` (default `86400`).
 
 Because the tracker is meant to run 24/7, this needs no external scheduler — the
-always-running loop does it. If you *don't* keep `run.py` running, you can drive
-the same refresh on demand or from Windows Task Scheduler / cron:
+always-running loop does it. If you *don't* keep `run.py` running, drive the same
+prune+refresh on demand or from Windows Task Scheduler / cron:
 
 ```bash
 python -m price_tracker.maintenance
 ```
 
+### One database per site
+
+Each site gets its **own SQLite file inside a shared volume** —
+`polovniautomobili.db`, and later `kleinanzeigen.db`, side by side in the folder
+set by `DB_DIR` (or the folder of a legacy `DB_PATH`; default: next to the code).
+Adding a site never touches another's data, and each db is kept single-site (rows
+from any other site are purged on open). The old single `price_tracker.db` is
+adopted as `polovniautomobili.db` automatically on first start.
+
 ### Why the design is the way it is
 
-- **Stored stats per `(site, brand, model, year, fuel)`, refreshed hourly:** the median is
-  more robust than a mean but needs the whole sample to compute — so we compute
-  it in the hourly refresh (which reads the full sample once) and store it in a
+- **Rolling window, one stored row per `(site, brand, model, year, fuel)`:** the
+  median is more robust than a mean but needs its whole sample to compute — so we
+  compute it in the hourly refresh (reading the window once) and store it in a
   single row. Every scan then reads just that one row (O(1) per listing) instead
-  of re-scanning many comparables. Best of both: robust *and* cheap.
+  of re-scanning many comparables. Best of both: robust *and* cheap — and the db
+  stays small because old listings are pruned.
 - **Median/MAD, not mean:** one overpriced or one scam listing can't skew it.
 - **SQLite (WAL, batched commits):** standard-library (no extra dependency), and
-  everything persists — the comparable corpus, the per-model-year stats, and
+  everything persists — the recent-comparable window, the per-group stats, and
   which searches have already been seeded. So a **restart resumes instantly**
-  from the stored corpus instead of re-scraping to rebuild it. Writes run in WAL
+  from the stored data instead of re-scraping to rebuild it. Writes run in WAL
   mode and commit once per scan, so a cycle costs one disk flush, not one per ad.
 - **Hardcoded circuit breaker:** never more than 60 requests/min to a site, in
   any rolling 60s window. It is deliberately **not** a config knob — it's a bug

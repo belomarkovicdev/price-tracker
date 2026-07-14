@@ -4,12 +4,16 @@
 # How often to run a full poll cycle across all enabled searches.
 poll_interval_seconds: 20
 
-# How often the engine force-refreshes the stored market medians and posts a
-# Telegram "DB is being updated" heartbeat. Each refresh recomputes the median
-# for every (site, brand, model, year, fuel) group that received a listing in
-# this window — over that group's full corpus, not just the window's slice.
-# Default hourly. Set to 0 to disable (the per-scan 24h refresh still applies).
+# How often the engine prunes old listings, recomputes the stored market
+# medians, and posts a Telegram "DB is being updated" heartbeat. Default hourly.
+# Set to 0 to disable the periodic refresh.
 median_refresh_interval_seconds: 3600
+
+# Rolling window. Listings not seen within this long are pruned from the db, and
+# each median is recomputed over what's left. This keeps the db bounded (one db
+# file per site, in the volume set by DB_DIR / DB_PATH's folder) and ties the
+# median to the recent market rather than the whole history. Default 24h.
+retention_window_seconds: 86400
 
 # Below-average deal detection.
 # For each (brand, model, year) we keep a SINGLE stored row of price stats
@@ -86,7 +90,11 @@ sites:
         url: "https://www.polovniautomobili.com/auto-oglasi/pretraga?brand=Volkswagen&sort=basic&yearFrom=2010&yearTo=2017"
 
   kleinanzeigen:
-    enabled: true
+    # Disabled: we only track polovniautomobili for now. Its rows are purged from
+    # the polovni db on open. To add it back later, set enabled: true and add
+    # searches — it gets its own kleinanzeigen.db in the same volume, separate
+    # from the polovni data.
+    enabled: false
     # German classifieds. Server-rendered HTML; the results cards carry only
     # title/price/mileage/EZ, so the structured fields (Marke, Modell,
     # Kraftstoffart, Erstzulassung) are read from each ad's detail page — but
