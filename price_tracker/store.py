@@ -26,6 +26,33 @@ from .models import Listing
 
 log = logging.getLogger(__name__)
 
+# The site whose data lived in the old single-file db (price_tracker.db). When we
+# switch to one db per site, that legacy file is adopted as this site's db.
+_LEGACY_DB_SITE = "polovniautomobili"
+_LEGACY_DB_NAME = "price_tracker.db"
+
+
+def open_site_store(db_dir: Path, site: str) -> "Store":
+    """Open the per-site db for `site` inside the volume `db_dir` (creating the
+    file if needed). Each site gets its own file — polovniautomobili.db,
+    kleinanzeigen.db, … — so adding a site never touches another's data, and all
+    live in one mounted volume.
+
+    Migration: the first time we open the polovni db and the old shared
+    price_tracker.db still exists, adopt it (move the .db + its -wal/-shm) instead
+    of starting empty, so the accumulated corpus carries over. Any non-polovni
+    rows it still holds are purged by the Store's foreign-site cleanup."""
+    db_dir = Path(db_dir)
+    target = db_dir / f"{site}.db"
+    legacy = db_dir / _LEGACY_DB_NAME
+    if site == _LEGACY_DB_SITE and not target.exists() and legacy.exists():
+        for suffix in ("", "-wal", "-shm"):
+            src = Path(str(legacy) + suffix)
+            if src.exists():
+                os.replace(src, Path(str(target) + suffix))
+        log.info("Adopted legacy %s as %s.", _LEGACY_DB_NAME, target.name)
+    return Store(target, site=site)
+
 
 def _percentile(sorted_vals: list[float], pct: float) -> float:
     if not sorted_vals:
@@ -121,7 +148,10 @@ CREATE TABLE IF NOT EXISTS seed_state (
 
 
 class Store:
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, site: Optional[str] = None) -> None:
+        # `site`, when given, is the one site this db belongs to; rows from any
+        # other site are purged on open so a per-site db stays single-site.
+        self.site = site
         # Ensure the parent dir exists (e.g. a mounted volume path like /data)
         # so sqlite can create the file there.
         db_path = Path(db_path)
@@ -172,8 +202,35 @@ class Store:
         self._migrate_model_prices()
         self.conn.executescript(_SCHEMA)
         self.conn.commit()
+        if self.site is not None:
+            self._drop_foreign_site_rows(self.site)
         self._cleanup_polovni_rows()
         self._maybe_vacuum()
+
+    def _drop_foreign_site_rows(self, own_site: str) -> None:
+        """Enforce the one-db-per-site invariant: delete every row that doesn't
+        belong to `own_site`. This purges kleinanzeigen (and anything else) out of
+        the polovni db adopted from the old shared price_tracker.db, and would do
+        the same if a stray site's rows ever landed in the wrong file. Idempotent:
+        matches nothing once the db holds only its own site."""
+        cur = self.conn.execute(
+            "DELETE FROM listings WHERE site != ?", (own_site,))
+        n = cur.rowcount
+        self.conn.execute(
+            "DELETE FROM model_prices WHERE site != ?", (own_site,))
+        # price_history/alerts key on "<site>:<id>"; seed_state on "<site>:<name>".
+        self.conn.execute(
+            "DELETE FROM price_history WHERE key NOT LIKE ?", (own_site + ":%",))
+        self.conn.execute(
+            "DELETE FROM alerts WHERE key NOT LIKE ?", (own_site + ":%",))
+        self.conn.execute(
+            "DELETE FROM seed_state WHERE seed_key NOT LIKE ?", (own_site + ":%",))
+        if n:
+            log.info(
+                "Purged %d listing(s) from other sites — this is the %s database.",
+                n, own_site,
+            )
+        self.conn.commit()
 
     def _maybe_vacuum(self) -> None:
         """Reclaim disk when much of the file is dead space. SQLite never shrinks
@@ -366,6 +423,23 @@ class Store:
             stats,
         )
         return stats
+
+    def prune_listings_older_than(self, cutoff_ts: float) -> tuple[int, int]:
+        """Delete listings not seen since `cutoff_ts` (and price-history points
+        older than it), returning (listings_deleted, history_deleted). This makes
+        `listings` a rolling window rather than an ever-growing corpus: the median
+        is computed from the recent window, and the table (and file) stay bounded
+        to roughly one window's worth of data. Does not commit — the caller does.
+
+        Keyed on last_seen, so an ad still appearing in results (re-seen every
+        cycle) is kept; one that dropped off more than a window ago ages out."""
+        n_listings = self.conn.execute(
+            "DELETE FROM listings WHERE last_seen < ?", (cutoff_ts,)
+        ).rowcount
+        n_history = self.conn.execute(
+            "DELETE FROM price_history WHERE seen_at < ?", (cutoff_ts,)
+        ).rowcount
+        return n_listings, n_history
 
     def refresh_medians_since(
         self, since_ts: float, bottom_percentile: float = 20.0,

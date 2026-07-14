@@ -82,11 +82,16 @@ class Config:
     evaluator: EvaluatorConfig
     telegram: TelegramConfig
     sites: list[SiteConfig]
-    # How often the engine force-refreshes the stored market medians (and posts a
-    # Telegram "DB is being updated" heartbeat) for groups seen in that window.
-    # Default hourly. 0 disables the periodic refresh (per-scan 24h TTL remains).
+    # How often the engine prunes + recomputes medians and posts a Telegram
+    # "DB is being updated" heartbeat. Default hourly. 0 disables it.
     median_refresh_interval_seconds: float = 3600.0
-    db_path: Path = field(default=ROOT / "price_tracker.db")
+    # Rolling window: listings not seen within this long are pruned, and each
+    # median is computed over what's left. Default 24h. Keeps the db bounded and
+    # the median tied to the recent market rather than the whole history.
+    retention_window_seconds: float = 24 * 3600.0
+    # Volume directory holding one db file per site (polovniautomobili.db,
+    # kleinanzeigen.db, …). Adding a site never touches another's data.
+    db_dir: Path = field(default=ROOT)
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -134,10 +139,19 @@ def load_config(path: Path | None = None) -> Config:
             )
         )
 
-    # DB location: default next to the code, or override with DB_PATH so a
-    # mounted volume (e.g. Railway) can hold the corpus across redeploys.
-    db_env = os.environ.get("DB_PATH")
-    db_path = Path(db_env) if db_env else ROOT / "price_tracker.db"
+    # DB volume: a directory holding one db file per site. Resolve it from
+    # DB_DIR, else the *directory* of a legacy DB_PATH (kept for back-compat with
+    # existing mounted-volume setups, e.g. Railway /data/price_tracker.db), else
+    # next to the code. Each site's file is <db_dir>/<site>.db.
+    db_dir_env = os.environ.get("DB_DIR")
+    db_path_env = os.environ.get("DB_PATH")
+    if db_dir_env:
+        db_dir = Path(db_dir_env)
+    elif db_path_env:
+        p = Path(db_path_env)
+        db_dir = p if p.suffix == "" else p.parent
+    else:
+        db_dir = ROOT
 
     return Config(
         poll_interval_seconds=float(data.get("poll_interval_seconds", 20)),
@@ -146,5 +160,7 @@ def load_config(path: Path | None = None) -> Config:
         sites=sites,
         median_refresh_interval_seconds=float(
             data.get("median_refresh_interval_seconds", 3600)),
-        db_path=db_path,
+        retention_window_seconds=float(
+            data.get("retention_window_seconds", 24 * 3600)),
+        db_dir=db_dir,
     )

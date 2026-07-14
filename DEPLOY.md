@@ -26,16 +26,20 @@ vars are missing the app still runs and logs alerts in dry-run mode.
 
 ## 3. Persist the corpus across redeploys (recommended)
 
-By default the SQLite db lives inside the container and is **wiped on every
-redeploy**, forcing a full re-seed (with the current config that's 13 searches ×
-`seed_pages` ≈ 100+ page fetches). To keep the accumulated corpus and medians:
+By default the SQLite dbs live inside the container and are **wiped on every
+redeploy**, forcing a full re-seed. To keep the accumulated data and medians:
 
-1. Service → **Variables** → add a **Volume**, mount path **`/data`**.
-2. Service → **Variables** → add `DB_PATH` = **`/data/price_tracker.db`**.
+1. Service → add a **Volume**, mount path **`/data`**.
+2. Service → **Variables** → add `DB_DIR` = **`/data`**.
 
-The app reads `DB_PATH` and stores the db on the volume (creating `/data` if
-needed), so redeploys reuse the existing corpus instead of re-scraping. Leave
-`DB_PATH` unset to keep the db next to the code (ephemeral).
+The app keeps **one db file per site** in `DB_DIR` (`/data/polovniautomobili.db`,
+and `kleinanzeigen.db` if you re-enable it), so redeploys reuse the existing data
+instead of re-scraping. Leave `DB_DIR` unset to keep the dbs next to the code
+(ephemeral).
+
+> Back-compat: an older `DB_PATH=/data/price_tracker.db` still works — its
+> **folder** (`/data`) is used as the volume, and the existing
+> `price_tracker.db` is adopted as `polovniautomobili.db` automatically.
 
 ## 4. Deploy
 
