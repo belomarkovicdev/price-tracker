@@ -30,12 +30,19 @@ log = logging.getLogger(__name__)
 
 _BASE = "https://www.kleinanzeigen.de"
 
-# Every genuine search-results page — even one with zero matching ads — renders
-# the results container. A soft block / bot challenge / interstitial returns
-# HTTP 200 WITHOUT it, which would otherwise parse to zero cards and be silently
-# logged as "0 listings". Its presence is what tells a real (possibly empty)
-# result set apart from a page we were never actually served.
+# Telling a populated page, a genuinely-empty search, and a block apart — all of
+# which are HTTP 200 — needs two markers, since each has a distinct shape:
+#   * populated results  -> results container present, ad cards parse
+#   * genuinely empty     -> NO results container; a "keine Ergebnisse" page
+#   * throttle/soft block -> results container present but ZERO cards (kleinanzeigen
+#                            serves this after a request burst, then recovers)
+#   * challenge/interstitial -> neither container nor the empty-results marker
+# Only the first two are legitimate; the last two are surfaced as BlockedError so
+# they're logged and backed off instead of silently reported as "0 listings".
 _RESULTS_CONTAINER = "srchrslt-adtable"
+# Case-insensitive; lives in the empty-state breadcrumb ("Es wurden keine
+# Ergebnisse ... gefunden"). Marks a legitimately empty search, not a block.
+_EMPTY_RESULTS_MARKER = "keine ergebnisse"
 
 # Each result is a <li class="ad-listitem ..."> wrapping an
 # <article class="aditem" data-adid=".." data-href="..">. The li class carries
@@ -87,19 +94,27 @@ class KleinanzeigenScraper(Scraper):
         last_page = start_page + max(1, num_pages) - 1
         for page in range(start_page, last_page + 1):
             resp = self.get(_page_url(url, page))
-            if _RESULTS_CONTAINER not in resp.text:
-                # HTTP 200 but not a real results page: soft block / bot
-                # challenge / interstitial (common from datacenter IPs, and not
-                # caught by the shared status/keyword block detector). Surface
-                # it as a block instead of silently reporting "0 listings" —
-                # the engine logs it and backs off for the cycle.
-                raise BlockedError(
-                    f"[{self.site}] no results container on page {page} "
-                    "(soft block / challenge / layout change?)"
-                )
             cards = _parse_cards(resp.text)
             if not cards:
-                break   # empty / past the last page
+                # No ad cards — distinguish a legitimate empty page from a block
+                # (all three are HTTP 200, so status alone can't tell them apart).
+                if _RESULTS_CONTAINER in resp.text:
+                    # A real results shell with zero items: kleinanzeigen serves
+                    # this as a throttle/soft-block after a burst (a genuinely
+                    # empty search has NO container, just a "keine Ergebnisse"
+                    # page). Surface it instead of logging a silent "0 listings".
+                    raise BlockedError(
+                        f"[{self.site}] results container but no ad cards on "
+                        f"page {page} (throttled / soft block?)"
+                    )
+                if _EMPTY_RESULTS_MARKER in resp.text.lower():
+                    break   # genuinely no matching ads / past the last page
+                # Neither populated nor a recognizable empty-results page:
+                # challenge / interstitial / layout change.
+                raise BlockedError(
+                    f"[{self.site}] no results container and no empty-results "
+                    f"marker on page {page} (block / challenge / layout change?)"
+                )
             for card in cards:
                 # Reuse structured attrs for ads we've already enriched; only pay
                 # a detail-page fetch on genuinely new ads.
