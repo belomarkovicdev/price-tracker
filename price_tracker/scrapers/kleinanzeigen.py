@@ -24,11 +24,18 @@ import re
 from typing import Any, Callable, Optional
 
 from ..models import Listing
-from .base import Scraper, register
+from .base import BlockedError, Scraper, register
 
 log = logging.getLogger(__name__)
 
 _BASE = "https://www.kleinanzeigen.de"
+
+# Every genuine search-results page — even one with zero matching ads — renders
+# the results container. A soft block / bot challenge / interstitial returns
+# HTTP 200 WITHOUT it, which would otherwise parse to zero cards and be silently
+# logged as "0 listings". Its presence is what tells a real (possibly empty)
+# result set apart from a page we were never actually served.
+_RESULTS_CONTAINER = "srchrslt-adtable"
 
 # Each result is a <li class="ad-listitem ..."> wrapping an
 # <article class="aditem" data-adid=".." data-href="..">. The li class carries
@@ -73,6 +80,16 @@ class KleinanzeigenScraper(Scraper):
         last_page = start_page + max(1, num_pages) - 1
         for page in range(start_page, last_page + 1):
             resp = self.get(_page_url(url, page))
+            if _RESULTS_CONTAINER not in resp.text:
+                # HTTP 200 but not a real results page: soft block / bot
+                # challenge / interstitial (common from datacenter IPs, and not
+                # caught by the shared status/keyword block detector). Surface
+                # it as a block instead of silently reporting "0 listings" —
+                # the engine logs it and backs off for the cycle.
+                raise BlockedError(
+                    f"[{self.site}] no results container on page {page} "
+                    "(soft block / challenge / layout change?)"
+                )
             cards = _parse_cards(resp.text)
             if not cards:
                 break   # empty / past the last page
