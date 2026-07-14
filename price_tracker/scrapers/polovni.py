@@ -25,7 +25,9 @@ _NEXT_DATA_RE = re.compile(
 # Each listing is an <article data-testid="featuredAd"|"emptyAd"> block; the
 # JSON `featuredSearch` flag is unreliable (true for every result), but this
 # DOM marker distinguishes paid/promoted ("featuredAd") from regular private
-# ("emptyAd") ads on every page. We map the marker back to the listing id.
+# ("emptyAd") ads on every page. We map the marker back to the listing id and
+# keep ONLY the emptyAds: the featuredAds are the same promoted listings pinned
+# to the top of every page, so they duplicate across pages and inflate stats.
 _ARTICLE_RE = re.compile(r'<article\b[^>]*?data-testid="(featuredAd|emptyAd)"', re.S)
 _ID_IN_ARTICLE_RE = re.compile(r'/auto-oglasi/(\d+)')
 _BASE = "https://www.polovniautomobili.com"
@@ -46,9 +48,13 @@ class PolovniScraper(Scraper):
             page_url = url if page == 1 else _with_page(url, page)
             resp = self.get(page_url)
             results, page_count = self._parse_page(resp.text, search_name)
-            featured_ids = _featured_ids(resp.text)
+            empty_ids = _empty_ad_ids(resp.text)
             for r in results:
-                listing = self._to_listing(search_name, r, featured_ids)
+                # Skip paid/promoted ads entirely: keep only regular "emptyAd"
+                # private listings.
+                if str(r.get("id")) not in empty_ids:
+                    continue
+                listing = self._to_listing(search_name, r)
                 if listing is not None:
                     listings.append(listing)
             # Stop early: empty page, or we've reached the last page.
@@ -71,7 +77,7 @@ class PolovniScraper(Scraper):
             return [], None
 
     def _to_listing(
-        self, search_name: str, r: dict[str, Any], featured_ids: set[str]
+        self, search_name: str, r: dict[str, Any]
     ) -> Listing | None:
         listing_id = r.get("id")
         if listing_id is None:
@@ -103,23 +109,27 @@ class PolovniScraper(Scraper):
             power_kw=_int(r.get("power")),
             city=_clean(r.get("city")),
             status=str(r.get("status") or "active"),
-            # Paid/promoted vs regular, from the reliable DOM marker.
-            featured=listing_id in featured_ids,
+            # Always a regular private ad here — featured/promoted ads are
+            # filtered out before we ever build a Listing.
+            featured=False,
             image=r.get("imageMain"),
             raw=r,
         )
 
 
-def _featured_ids(html: str) -> set[str]:
-    """Set of listing ids whose <article> is marked data-testid="featuredAd"
-    (paid/promoted). Regular ads are "emptyAd" and are not included."""
+def _empty_ad_ids(html: str) -> set[str]:
+    """Set of listing ids whose <article> is marked data-testid="emptyAd"
+    (regular private ads). Paid/promoted ads are "featuredAd" and are excluded,
+    so the caller keeps only these."""
     ids: set[str] = set()
-    # Walk each <article ...> block and, if it's a featuredAd, grab the first
-    # listing id inside it.
-    for m in _ARTICLE_RE.finditer(html):
-        if m.group(1) != "featuredAd":
+    # Walk each <article ...> block, bounded by the next article, and if it's an
+    # emptyAd grab the first listing id inside it.
+    matches = list(_ARTICLE_RE.finditer(html))
+    for i, m in enumerate(matches):
+        if m.group(1) != "emptyAd":
             continue
-        block = html[m.start(): m.start() + 3000]
+        end = matches[i + 1].start() if i + 1 < len(matches) else m.start() + 3000
+        block = html[m.start(): end]
         idm = _ID_IN_ARTICLE_RE.search(block)
         if idm:
             ids.add(idm.group(1))
