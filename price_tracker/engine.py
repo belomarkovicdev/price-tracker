@@ -21,7 +21,7 @@ import time
 from .buffer import ListingBuffer
 from .config import Config, load_config
 from .evaluator import Evaluator
-from .maintenance import _MIN_ROWS_TO_UPDATE, refresh_medians
+from .maintenance import refresh_medians
 from .notify import Notification
 from .notify.telegram import build_notifier
 from .ratelimit import CircuitBreakerTripped
@@ -107,7 +107,7 @@ class Engine:
                     store, self.buffers[name], self.notifier,
                     self.cfg.evaluator.bottom_percentile,
                     window_seconds=self.cfg.retention_window_seconds,
-                    announce=False,
+                    announce=False, min_rows=self.cfg.median_min_samples,
                 )
                 tot_g += g
                 tot_l += listings
@@ -189,14 +189,16 @@ class Engine:
             buffer.upsert(listing, now)
         new_count = max(0, len(buffer) - before)
 
-        # Group medians, computed live from the buffer for every group with more
-        # than 4 comparables — this is what we judge against (and what the hourly
-        # refresh persists to model_prices).
+        # Group medians, computed live from the buffer for every group with
+        # enough comparables to judge against (evaluator.min_samples). Note this
+        # is the *alerting* threshold; persisting a median to the db uses the
+        # separate, higher median_min_samples (see _maybe_refresh_medians).
         bp = self.cfg.evaluator.bottom_percentile
+        min_n = self.cfg.evaluator.min_samples
         stats_by_group = {
             group: price_stats(prices, bp)
             for group, prices in buffer.group_prices().items()
-            if len(prices) >= _MIN_ROWS_TO_UPDATE
+            if len(prices) >= min_n
         }
 
         # Evaluate each listing against its group's median; alert on fresh deals.
