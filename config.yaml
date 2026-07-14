@@ -33,8 +33,8 @@ evaluator:
   # (must be further below); lower = looser (flags smaller dips).
   mad_k: 1.5
   bottom_percentile: 20 # ...or price sits in the bottom Nth percentile of the sample
-  min_deal_discount: 0.12 # require at least this fraction below the median to alert
-  scam_floor_ratio: 0.6 # ignore prices below this fraction of median (likely scam/parts/typo)
+  min_deal_discount: 0.2 # require at least this fraction below the median to alert
+  scam_floor_ratio: 0.8 # ignore prices below this fraction of median (likely scam/parts/typo)
   min_price: 1000 # absolute price floor (EUR); below this is noise
 
 notify:
