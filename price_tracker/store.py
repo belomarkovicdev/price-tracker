@@ -264,7 +264,6 @@ class Store:
     def update_model_price(
         self, site: str, brand: str, model: str, year: int, fuel: str,
         bottom_percentile: float = 20.0,
-        ttl_seconds: Optional[float] = None,
     ) -> Optional[dict]:
         """Recompute the price stats (avg, median, MAD, low-percentile) across
         all active, priced listings with this exact site+brand+model+year+fuel
@@ -277,14 +276,10 @@ class Store:
         it — so the stored median/MAD are as robust as a live computation.
         Evaluation then reads just this one row.
 
-        If ttl_seconds is given and the stored row was refreshed more recently
-        than that, the recompute is skipped and the existing row is returned
-        unchanged — so the stats refresh at most once per ttl (e.g. daily)."""
-        if ttl_seconds is not None:
-            existing = self.get_model_price(site, brand, model, year, fuel)
-            if (existing is not None and existing["updated_at"] is not None
-                    and time.time() - existing["updated_at"] < ttl_seconds):
-                return dict(existing)
+        This always recomputes from the full sample; callers decide *when* to
+        call it. The engine computes a row the first time a group is seen (so it
+        can be judged that same cycle), and the hourly maintenance pass
+        force-refreshes every group seen in the last hour."""
         prices = [r["price"] for r in self.conn.execute(
             "SELECT price FROM listings "
             "WHERE site = ? AND brand = ? AND model = ? AND year = ? "
@@ -319,6 +314,35 @@ class Store:
             stats,
         )
         return stats
+
+    def refresh_medians_since(
+        self, since_ts: float, bottom_percentile: float = 20.0,
+    ) -> tuple[int, int]:
+        """Force-recompute the stored price stats (median/MAD/low-percentile) for
+        every group that received a listing since `since_ts`, and return
+        (groups_refreshed, listings_covered).
+
+        The time window only selects WHICH groups to refresh — the ones whose
+        data changed in the last hour. Each group's median is still computed over
+        its FULL active corpus (via update_model_price, which recomputes from the
+        whole sample), because an hour of listings alone is too thin to be a
+        robust median. Does not commit — the caller does."""
+        groups = self.conn.execute(
+            "SELECT DISTINCT site, brand, model, year, fuel FROM listings "
+            "WHERE last_seen >= ? AND price IS NOT NULL AND status = 'active' "
+            "AND brand IS NOT NULL AND model IS NOT NULL "
+            "AND year IS NOT NULL AND fuel IS NOT NULL",
+            (since_ts,),
+        ).fetchall()
+        listings = 0
+        for g in groups:
+            stats = self.update_model_price(
+                g["site"], g["brand"], g["model"], g["year"], g["fuel"],
+                bottom_percentile=bottom_percentile,
+            )
+            if stats is not None:
+                listings += stats["sample_count"]
+        return len(groups), listings
 
     def get_model_price(
         self, site: str, brand: str, model: str, year: int, fuel: str

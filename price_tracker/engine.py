@@ -20,6 +20,7 @@ import time
 
 from .config import Config, load_config
 from .evaluator import Evaluator
+from .maintenance import refresh_medians
 from .notify import Notification
 from .notify.telegram import build_notifier
 from .ratelimit import CircuitBreakerTripped
@@ -27,9 +28,6 @@ from .scrapers import BlockedError, build_scraper
 from .store import Store
 
 log = logging.getLogger(__name__)
-
-# Refresh each brand+model+year average at most this often.
-_AVG_TTL_SECONDS = 24 * 3600
 
 
 class Engine:
@@ -52,6 +50,9 @@ class Engine:
         if self._seeded:
             log.info("Resuming: %d search(es) already seeded in db.",
                      len(self._seeded))
+        # First periodic median refresh fires one interval from startup (not on
+        # every restart), so restarts don't spam the Telegram heartbeat.
+        self._last_median_refresh = time.time()
         self._running = True
 
     def stop(self, *_: object) -> None:
@@ -69,11 +70,33 @@ class Engine:
                 self.run_cycle()
             except Exception:  # never let one bad cycle kill the loop
                 log.exception("Unexpected error during cycle")
+            self._maybe_refresh_medians()
             elapsed = time.monotonic() - start
             sleep_for = max(0.0, self.cfg.poll_interval_seconds - elapsed)
             self._interruptible_sleep(sleep_for)
         self.store.close()
         log.info("Stopped.")
+
+    def _maybe_refresh_medians(self) -> None:
+        """Once per `median_refresh_interval_seconds`, force-recompute the stored
+        medians for every group seen in that window and post a Telegram heartbeat.
+        This owns all periodic refreshing; the per-scan step only seeds a row for
+        a group the first time it's seen. Guarded so a failure here never kills
+        the poll loop."""
+        interval = self.cfg.median_refresh_interval_seconds
+        if interval <= 0:
+            return
+        if time.time() - self._last_median_refresh < interval:
+            return
+        self._last_median_refresh = time.time()
+        try:
+            refresh_medians(
+                self.store, self.notifier,
+                self.cfg.evaluator.bottom_percentile,
+                since_seconds=interval,
+            )
+        except Exception:
+            log.exception("Periodic median refresh failed")
 
     def _interruptible_sleep(self, seconds: float) -> None:
         deadline = time.monotonic() + seconds
@@ -148,16 +171,19 @@ class Engine:
                 touched.add(
                     (listing.brand, listing.model, listing.year, listing.fuel))
 
-        # Refresh the per-(brand, model, year, fuel) price stats — but at most
-        # once per 24h per group (the TTL skips the recompute if it's fresh).
-        # Scoped to this site so markets are never mixed. One row per group,
-        # upserted — never duplicated.
+        # Seed a price-stats row for any newly-seen group that doesn't have one
+        # yet, so its listings can be judged in this same cycle. Existing rows
+        # are left untouched here and kept current by the hourly median refresh
+        # (see _maybe_refresh_medians), so a scan never repeats the full-sample
+        # recompute. Scoped to this site so markets are never mixed; one row per
+        # group, upserted — never duplicated.
         for brand, model, year, fuel in touched:
-            self.store.update_model_price(
-                site_name, brand, model, year, fuel,
-                bottom_percentile=self.cfg.evaluator.bottom_percentile,
-                ttl_seconds=_AVG_TTL_SECONDS,
-            )
+            if self.store.get_model_price(
+                    site_name, brand, model, year, fuel) is None:
+                self.store.update_model_price(
+                    site_name, brand, model, year, fuel,
+                    bottom_percentile=self.cfg.evaluator.bottom_percentile,
+                )
 
         # Pass 2: evaluate each listing against the single stored average price
         # for its site+brand+model+year+fuel group.

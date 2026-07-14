@@ -82,6 +82,10 @@ class Config:
     evaluator: EvaluatorConfig
     telegram: TelegramConfig
     sites: list[SiteConfig]
+    # How often the engine force-refreshes the stored market medians (and posts a
+    # Telegram "DB is being updated" heartbeat) for groups seen in that window.
+    # Default hourly. 0 disables the periodic refresh (per-scan 24h TTL remains).
+    median_refresh_interval_seconds: float = 3600.0
     db_path: Path = field(default=ROOT / "price_tracker.db")
 
 
@@ -140,5 +144,7 @@ def load_config(path: Path | None = None) -> Config:
         evaluator=evaluator,
         telegram=telegram,
         sites=sites,
+        median_refresh_interval_seconds=float(
+            data.get("median_refresh_interval_seconds", 3600)),
         db_path=db_path,
     )

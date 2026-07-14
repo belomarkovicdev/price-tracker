@@ -40,3 +40,9 @@ class Notification:
 class Notifier:
     def send(self, note: Notification) -> bool:
         raise NotImplementedError
+
+    def send_text(self, text: str) -> bool:
+        """Send a plain status/heartbeat message not tied to a deal (e.g. the
+        hourly 'DB is being updated' notice). Separate from send() because that
+        one renders a Notification; this takes arbitrary text."""
+        raise NotImplementedError
