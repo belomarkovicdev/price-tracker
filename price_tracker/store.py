@@ -13,7 +13,6 @@ recent N comparables" query the evaluator needs.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sqlite3
@@ -21,8 +20,6 @@ import statistics
 import time
 from pathlib import Path
 from typing import Optional
-
-from .models import Listing
 
 log = logging.getLogger(__name__)
 
@@ -65,57 +62,22 @@ def _percentile(sorted_vals: list[float], pct: float) -> float:
     return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (rank - lo)
 
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS listings (
-    key          TEXT PRIMARY KEY,
-    site         TEXT NOT NULL,
-    listing_id   TEXT NOT NULL,
-    search_name  TEXT,
-    url          TEXT,
-    title        TEXT,
-    price        REAL,
-    currency     TEXT,
-    brand        TEXT,
-    model        TEXT,
-    year         INTEGER,
-    mileage      INTEGER,
-    fuel         TEXT,
-    gearbox      TEXT,
-    engine_cc    INTEGER,
-    power_kw     INTEGER,
-    city         TEXT,
-    status       TEXT,
-    featured     INTEGER,
-    image        TEXT,
-    raw          TEXT,
-    first_seen   REAL,
-    last_seen    REAL
-);
-
-CREATE TABLE IF NOT EXISTS price_history (
-    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    key      TEXT NOT NULL,
-    price    REAL,
-    seen_at  REAL
-);
-CREATE INDEX IF NOT EXISTS idx_price_history_key ON price_history(key);
-
-CREATE TABLE IF NOT EXISTS alerts (
-    key           TEXT PRIMARY KEY,
-    alerted_price REAL,
-    alerted_at    REAL
-);
-
--- Drop the retired market_stats table and bucket index from any pre-existing
--- db. The deal decision now reads model_prices only; nothing queried these.
+-- The db now stores ONLY the aggregate medians and the alert-dedup log.
+-- Individual listings are NOT persisted: they live in an in-memory rolling
+-- buffer (see buffer.ListingBuffer) from which medians are computed. Drop the
+-- old per-listing tables from any pre-existing db and reclaim their space.
+DROP TABLE IF EXISTS listings;
+DROP INDEX IF EXISTS idx_listings_bucket;
+DROP TABLE IF EXISTS price_history;
+DROP INDEX IF EXISTS idx_price_history_key;
+DROP TABLE IF EXISTS seed_state;
 DROP INDEX IF EXISTS idx_market_stats_model;
 DROP TABLE IF EXISTS market_stats;
-DROP INDEX IF EXISTS idx_listings_bucket;
 
 -- One row per (site, brand, model, year, fuel) of price stats (median/MAD/
--- low-percentile + avg), collapsing mileage/gearbox variants into a single
--- record. The composite PRIMARY KEY guarantees we never duplicate a row for the
--- same group — repeat sightings update it in place. This is the only stats
--- table the deal decision reads.
+-- low-percentile + avg). Rebuilt from the in-memory buffer on each refresh, so
+-- it always reflects the current rolling window. This is the durable output —
+-- the price-median database you query.
 --
 -- `site` is in the key because prices are NOT comparable across markets (a
 -- German Kleinanzeigen car and a Serbian polovniautomobili one price entirely
@@ -137,14 +99,28 @@ CREATE TABLE IF NOT EXISTS model_prices (
     PRIMARY KEY (site, brand, model, year, fuel)
 );
 
--- Which searches have already been seeded (wide first-sight fetch). Persisted
--- so a restart trusts the corpus already in the db and skips re-seeding —
--- it goes straight to the light steady-state scan for fresh listings.
-CREATE TABLE IF NOT EXISTS seed_state (
-    seed_key   TEXT PRIMARY KEY,   -- "<site>:<search_name>"
-    seeded_at  REAL
+-- Alert-dedup log, so we don't re-alert the same ad (persisted across restarts
+-- and cycles). A later price drop re-qualifies it.
+CREATE TABLE IF NOT EXISTS alerts (
+    key           TEXT PRIMARY KEY,
+    alerted_price REAL,
+    alerted_at    REAL
 );
 """
+
+
+def price_stats(prices: list[float], bottom_percentile: float = 20.0) -> dict:
+    """Median/MAD/low-percentile/avg over a non-empty price list — the one place
+    the stats are defined, shared by the in-memory evaluation and the persisted
+    model_prices rebuild."""
+    median = statistics.median(prices)
+    return {
+        "avg_price": statistics.fmean(prices),
+        "median": median,
+        "mad": statistics.median([abs(p - median) for p in prices]),
+        "p_low": _percentile(sorted(prices), bottom_percentile),
+        "sample_count": len(prices),
+    }
 
 
 class Store:
@@ -204,31 +180,22 @@ class Store:
         self.conn.commit()
         if self.site is not None:
             self._drop_foreign_site_rows(self.site)
-        self._cleanup_polovni_rows()
         self._maybe_vacuum()
 
     def _drop_foreign_site_rows(self, own_site: str) -> None:
         """Enforce the one-db-per-site invariant: delete every row that doesn't
-        belong to `own_site`. This purges kleinanzeigen (and anything else) out of
-        the polovni db adopted from the old shared price_tracker.db, and would do
-        the same if a stray site's rows ever landed in the wrong file. Idempotent:
+        belong to `own_site`. Purges kleinanzeigen (and anything else) out of the
+        polovni db adopted from the old shared price_tracker.db. Idempotent:
         matches nothing once the db holds only its own site."""
-        cur = self.conn.execute(
-            "DELETE FROM listings WHERE site != ?", (own_site,))
-        n = cur.rowcount
-        self.conn.execute(
-            "DELETE FROM model_prices WHERE site != ?", (own_site,))
-        # price_history/alerts key on "<site>:<id>"; seed_state on "<site>:<name>".
-        self.conn.execute(
-            "DELETE FROM price_history WHERE key NOT LIKE ?", (own_site + ":%",))
+        n = self.conn.execute(
+            "DELETE FROM model_prices WHERE site != ?", (own_site,)).rowcount
+        # alerts key on "<site>:<id>".
         self.conn.execute(
             "DELETE FROM alerts WHERE key NOT LIKE ?", (own_site + ":%",))
-        self.conn.execute(
-            "DELETE FROM seed_state WHERE seed_key NOT LIKE ?", (own_site + ":%",))
         if n:
             log.info(
-                "Purged %d listing(s) from other sites — this is the %s database.",
-                n, own_site,
+                "Purged %d model_prices row(s) from other sites — this is the "
+                "%s database.", n, own_site,
             )
         self.conn.commit()
 
@@ -251,38 +218,12 @@ class Store:
             # VACUUM can reset the journal mode; re-assert WAL to be safe.
             self.conn.execute("PRAGMA journal_mode=WAL")
 
-    def _cleanup_polovni_rows(self) -> None:
-        """One-time scrub of legacy polovni rows. Polovni now stores only
-        brand/model/year/fuel/price (+ the structural id/url/title/status); rows
-        written before that still hold the descriptive fields (mileage, gearbox,
-        engine, power, city, image) and the full raw JSON blob we no longer keep.
-        Null them out so the stored data matches what the scraper now writes.
-
-        Idempotent: the WHERE clause matches only rows that still carry the old
-        data, so after the first pass this is a cheap no-op each open. Scoped to
-        polovniautomobili — kleinanzeigen still stores its (thin) raw + attrs."""
-        cur = self.conn.execute(
-            "UPDATE listings SET raw = '{}', mileage = NULL, gearbox = NULL, "
-            "engine_cc = NULL, power_kw = NULL, city = NULL, image = NULL "
-            "WHERE site = 'polovniautomobili' AND ("
-            "  raw IS NOT NULL AND raw != '{}' OR mileage IS NOT NULL "
-            "  OR gearbox IS NOT NULL OR engine_cc IS NOT NULL "
-            "  OR power_kw IS NOT NULL OR city IS NOT NULL OR image IS NOT NULL)"
-        )
-        if cur.rowcount:
-            log.info(
-                "Scrubbed %d legacy polovni row(s) to the stored fields "
-                "(dropped raw blob + mileage/gearbox/engine/power/city/image).",
-                cur.rowcount,
-            )
-        self.conn.commit()
-
     def _migrate_model_prices(self) -> None:
         """model_prices is now keyed by (site, brand, model, year, fuel). Older
         dbs keyed it by (brand, model, year) only. SQLite can't ALTER a primary
-        key, but this table is a derived cache (recomputed from `listings` on the
-        next scan), so the safe migration is simply to drop the stale-schema
-        table and let _SCHEMA recreate it with the new key."""
+        key, but this table is a derived cache (rebuilt from the in-memory buffer
+        on the next refresh), so the safe migration is simply to drop the
+        stale-schema table and let _SCHEMA recreate it with the new key."""
         cols = {r["name"]
                 for r in self.conn.execute("PRAGMA table_info(model_prices)")}
         if cols and "site" not in cols:
@@ -301,178 +242,41 @@ class Store:
         so a whole scan's writes batch into a single fsync."""
         self.conn.commit()
 
-    # -- upsert -------------------------------------------------------------
-    def upsert(self, listing: Listing) -> tuple[bool, Optional[float]]:
-        """Insert or update a listing. Returns (is_new, previous_price).
-        Records a price_history row on first sight and on any price change."""
-        now = time.time()
-        cur = self.conn.execute(
-            "SELECT price FROM listings WHERE key = ?", (listing.key,)
-        )
-        row = cur.fetchone()
-        is_new = row is None
-        prev_price = None if is_new else row["price"]
-
-        self.conn.execute(
-            """
-            INSERT INTO listings (key, site, listing_id, search_name, url, title,
-                price, currency, brand, model, year, mileage, fuel, gearbox,
-                engine_cc, power_kw, city, status, featured, image, raw,
-                first_seen, last_seen)
-            VALUES (:key,:site,:listing_id,:search_name,:url,:title,:price,
-                :currency,:brand,:model,:year,:mileage,:fuel,:gearbox,:engine_cc,
-                :power_kw,:city,:status,:featured,:image,:raw,:now,:now)
-            ON CONFLICT(key) DO UPDATE SET
-                search_name=excluded.search_name, url=excluded.url,
-                title=excluded.title, price=excluded.price,
-                status=excluded.status, featured=excluded.featured,
-                image=excluded.image,
-                mileage=excluded.mileage, last_seen=:now,
-                -- Refresh/backfill the structured comparables, but never wipe a
-                -- stored value with an incoming NULL: polovni always carries
-                -- these on the list page (so they stay current), while
-                -- kleinanzeigen reuses once-fetched detail attrs and must keep
-                -- them if a later scan lacks them. COALESCE = keep old on NULL.
-                fuel=COALESCE(excluded.fuel, fuel),
-                brand=COALESCE(excluded.brand, brand),
-                model=COALESCE(excluded.model, model),
-                year=COALESCE(excluded.year, year),
-                gearbox=COALESCE(excluded.gearbox, gearbox),
-                engine_cc=COALESCE(excluded.engine_cc, engine_cc),
-                power_kw=COALESCE(excluded.power_kw, power_kw),
-                city=COALESCE(excluded.city, city)
-            """,
-            {
-                "key": listing.key, "site": listing.site,
-                "listing_id": listing.listing_id, "search_name": listing.search_name,
-                "url": listing.url, "title": listing.title, "price": listing.price,
-                "currency": listing.currency, "brand": listing.brand,
-                "model": listing.model, "year": listing.year,
-                "mileage": listing.mileage, "fuel": listing.fuel,
-                "gearbox": listing.gearbox, "engine_cc": listing.engine_cc,
-                "power_kw": listing.power_kw, "city": listing.city,
-                "status": listing.status, "featured": int(listing.featured),
-                "image": listing.image,
-                "raw": json.dumps(listing.raw, ensure_ascii=False), "now": now,
-            },
-        )
-
-        if is_new or (prev_price != listing.price):
-            self.conn.execute(
-                "INSERT INTO price_history (key, price, seen_at) VALUES (?,?,?)",
-                (listing.key, listing.price, now),
-            )
-        return is_new, prev_price
-
-    # -- per (site, model, year, fuel) average -----------------------------
-    def update_model_price(
-        self, site: str, brand: str, model: str, year: int, fuel: str,
-        bottom_percentile: float = 20.0,
-        min_rows: int = 1,
-    ) -> Optional[dict]:
-        """Recompute the price stats (avg, median, MAD, low-percentile) across
-        all active, priced listings with this exact site+brand+model+year+fuel
-        and upsert the single row for it. Returns the row (or None if there are
-        no priced listings for it yet).
-
-        Scoping to `site` keeps markets from being mixed (see the schema note),
-        and to `fuel` keeps diesel and petrol of the same model-year in separate
-        pools. The whole sample is read here — this is the one place that needs
-        it — so the stored median/MAD are as robust as a live computation.
-        Evaluation then reads just this one row.
-
-        This always recomputes from the full sample; callers decide *when* to
-        call it. The engine computes a row the first time a group is seen (so it
-        can be judged that same cycle), and the hourly maintenance pass
-        force-refreshes every group seen in the last hour.
-
-        `min_rows` skips the group unless it has at least that many priced,
-        active comparables (returns None without touching the stored row) — the
-        hourly pass uses it to only update groups with more than 4 rows."""
-        prices = [r["price"] for r in self.conn.execute(
-            "SELECT price FROM listings "
-            "WHERE site = ? AND brand = ? AND model = ? AND year = ? "
-            "AND fuel = ? AND price IS NOT NULL AND status = 'active'",
-            (site, brand, model, year, fuel),
-        )]
-        if len(prices) < min_rows:
-            return None
-        median = statistics.median(prices)
-        stats = {
-            "site": site, "brand": brand, "model": model, "year": year,
-            "fuel": fuel,
-            "avg_price": statistics.fmean(prices),
-            "median": median,
-            "mad": statistics.median([abs(p - median) for p in prices]),
-            "p_low": _percentile(sorted(prices), bottom_percentile),
-            "sample_count": len(prices),
-            "updated_at": time.time(),
-        }
-        self.conn.execute(
-            """
-            INSERT INTO model_prices (site, brand, model, year, fuel, avg_price,
-                median, mad, p_low, sample_count, updated_at)
-            VALUES (:site,:brand,:model,:year,:fuel,:avg_price,:median,:mad,
-                :p_low,:sample_count,:updated_at)
-            ON CONFLICT(site, brand, model, year, fuel) DO UPDATE SET
-                avg_price=excluded.avg_price, median=excluded.median,
-                mad=excluded.mad, p_low=excluded.p_low,
-                sample_count=excluded.sample_count,
-                updated_at=excluded.updated_at
-            """,
-            stats,
-        )
-        return stats
-
-    def prune_listings_older_than(self, cutoff_ts: float) -> tuple[int, int]:
-        """Delete listings not seen since `cutoff_ts` (and price-history points
-        older than it), returning (listings_deleted, history_deleted). This makes
-        `listings` a rolling window rather than an ever-growing corpus: the median
-        is computed from the recent window, and the table (and file) stay bounded
-        to roughly one window's worth of data. Does not commit — the caller does.
-
-        Keyed on last_seen, so an ad still appearing in results (re-seen every
-        cycle) is kept; one that dropped off more than a window ago ages out."""
-        n_listings = self.conn.execute(
-            "DELETE FROM listings WHERE last_seen < ?", (cutoff_ts,)
-        ).rowcount
-        n_history = self.conn.execute(
-            "DELETE FROM price_history WHERE seen_at < ?", (cutoff_ts,)
-        ).rowcount
-        return n_listings, n_history
-
-    def refresh_medians_since(
-        self, since_ts: float, bottom_percentile: float = 20.0,
+    # -- medians (rebuilt from the in-memory buffer) ------------------------
+    def rebuild_model_prices(
+        self, group_prices: dict, bottom_percentile: float = 20.0,
         min_rows: int = 1,
     ) -> tuple[int, int]:
-        """Force-recompute the stored price stats (median/MAD/low-percentile) for
-        every group that received a listing since `since_ts`, and return
-        (groups_updated, listings_covered).
+        """Replace this site's stored medians with a fresh set computed from
+        `group_prices` — a {(brand, model, year, fuel): [price, …]} snapshot of
+        the in-memory buffer. Groups with fewer than `min_rows` prices are left
+        out entirely (no stale rows survive). Returns (groups_written,
+        prices_used). Does not commit — the caller does.
 
-        The time window only selects WHICH groups to consider — the ones whose
-        data changed in the last hour. Each group's median is still computed over
-        its FULL active corpus (via update_model_price, which recomputes from the
-        whole sample), because an hour of listings alone is too thin to be a
-        robust median. `min_rows` is passed straight through, so groups with
-        fewer than that many comparables are skipped (not updated). Does not
-        commit — the caller does."""
-        candidates = self.conn.execute(
-            "SELECT DISTINCT site, brand, model, year, fuel FROM listings "
-            "WHERE last_seen >= ? AND price IS NOT NULL AND status = 'active' "
-            "AND brand IS NOT NULL AND model IS NOT NULL "
-            "AND year IS NOT NULL AND fuel IS NOT NULL",
-            (since_ts,),
-        ).fetchall()
-        updated = listings = 0
-        for g in candidates:
-            stats = self.update_model_price(
-                g["site"], g["brand"], g["model"], g["year"], g["fuel"],
-                bottom_percentile=bottom_percentile, min_rows=min_rows,
+        We delete-then-insert the whole site so model_prices is always an exact
+        projection of the current rolling window: a group that aged out simply
+        stops having a row."""
+        self.conn.execute(
+            "DELETE FROM model_prices WHERE site = ?", (self.site,))
+        now = time.time()
+        groups = used = 0
+        for (brand, model, year, fuel), prices in group_prices.items():
+            if len(prices) < min_rows:
+                continue
+            s = price_stats(prices, bottom_percentile)
+            self.conn.execute(
+                """
+                INSERT INTO model_prices (site, brand, model, year, fuel,
+                    avg_price, median, mad, p_low, sample_count, updated_at)
+                VALUES (:site,:brand,:model,:year,:fuel,:avg_price,:median,:mad,
+                    :p_low,:sample_count,:updated_at)
+                """,
+                {"site": self.site, "brand": brand, "model": model,
+                 "year": year, "fuel": fuel, "updated_at": now, **s},
             )
-            if stats is not None:
-                updated += 1
-                listings += stats["sample_count"]
-        return updated, listings
+            groups += 1
+            used += len(prices)
+        return groups, used
 
     def get_model_price(
         self, site: str, brand: str, model: str, year: int, fuel: str
@@ -482,32 +286,6 @@ class Store:
             "AND model = ? AND year = ? AND fuel = ?",
             (site, brand, model, year, fuel),
         ).fetchone()
-
-    def get_listing_attrs(self, key: str) -> Optional[dict]:
-        """The structured car attributes we already stored for a listing, or
-        None if we've never seen it. Lets a scraper reuse a known ad's details
-        (e.g. from an earlier detail-page fetch) instead of fetching them again."""
-        row = self.conn.execute(
-            "SELECT brand, model, year, fuel, mileage, gearbox, power_kw, "
-            "engine_cc, city FROM listings WHERE key = ?",
-            (key,),
-        ).fetchone()
-        return dict(row) if row is not None else None
-
-    # -- seed state ---------------------------------------------------------
-    def seeded_keys(self) -> set[str]:
-        """Searches already seeded in a previous run — loaded once at startup so
-        restarts don't re-fetch a corpus the db already holds."""
-        return {r["seed_key"] for r in self.conn.execute(
-            "SELECT seed_key FROM seed_state")}
-
-    def mark_seeded(self, seed_key: str) -> None:
-        self.conn.execute(
-            "INSERT INTO seed_state (seed_key, seeded_at) VALUES (?,?) "
-            "ON CONFLICT(seed_key) DO UPDATE SET seeded_at=excluded.seeded_at",
-            (seed_key, time.time()),
-        )
-        self.conn.commit()
 
     # -- alerts -------------------------------------------------------------
     def already_alerted(self, key: str, price: Optional[float]) -> bool:

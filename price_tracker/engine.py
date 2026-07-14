@@ -18,14 +18,15 @@ import logging
 import signal
 import time
 
+from .buffer import ListingBuffer
 from .config import Config, load_config
 from .evaluator import Evaluator
-from .maintenance import refresh_medians
+from .maintenance import _MIN_ROWS_TO_UPDATE, refresh_medians
 from .notify import Notification
 from .notify.telegram import build_notifier
 from .ratelimit import CircuitBreakerTripped
 from .scrapers import BlockedError, build_scraper
-from .store import Store, open_site_store
+from .store import Store, open_site_store, price_stats
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,9 @@ class Engine:
         self.notifier = build_notifier(cfg.telegram)
         self.scrapers: dict[str, tuple] = {}
         self.stores: dict[str, Store] = {}
+        # Per-site in-memory rolling buffer of recent listings — the sample the
+        # medians are computed from. Nothing per-listing is written to disk.
+        self.buffers: dict[str, ListingBuffer] = {}
         # One db per enabled site, inside the shared volume (cfg.db_dir). Each
         # store purges any other site's rows on open, so the files stay
         # single-site even after adopting the old shared price_tracker.db.
@@ -48,14 +52,10 @@ class Engine:
                 continue
             self.scrapers[site.name] = (site, scraper)
             self.stores[site.name] = open_site_store(cfg.db_dir, site.name)
-        # Searches already seeded, per site — loaded from each db so a restart
-        # trusts the existing corpus and skips the wide re-seed.
-        self._seeded: dict[str, set[str]] = {
-            name: store.seeded_keys() for name, store in self.stores.items()}
-        already = sum(len(s) for s in self._seeded.values())
-        if already:
-            log.info("Resuming: %d search(es) already seeded across %d db(s).",
-                     already, len(self.stores))
+            self.buffers[site.name] = ListingBuffer()
+        # Searches seeded this run, per site. The buffer is volatile, so we seed
+        # on every start to refill it — this set is in-memory, not persisted.
+        self._seeded: dict[str, set[str]] = {name: set() for name in self.stores}
         # First periodic refresh fires one interval from startup (not on every
         # restart), so restarts don't spam the Telegram heartbeat.
         self._last_median_refresh = time.time()
@@ -102,9 +102,9 @@ class Engine:
                 f"\U0001F504 Updating price database — pruning to the last "
                 f"{hours:.0f}h and recomputing market medians…")
             tot_g = tot_l = tot_p = 0
-            for store in self.stores.values():
+            for name, store in self.stores.items():
                 g, listings, pruned = refresh_medians(
-                    store, self.notifier,
+                    store, self.buffers[name], self.notifier,
                     self.cfg.evaluator.bottom_percentile,
                     window_seconds=self.cfg.retention_window_seconds,
                     announce=False,
@@ -126,6 +126,7 @@ class Engine:
     def run_cycle(self) -> None:
         for name, (site, scraper) in self.scrapers.items():
             store = self.stores[name]
+            buffer = self.buffers[name]
             seeded = self._seeded[name]
             for search in site.searches:
                 if not self._running:
@@ -151,25 +152,23 @@ class Engine:
                     # where new regular posts appear.
                     num_pages = site.scan_pages
                 ok = self._process_search(
-                    store, scraper, site.name, search.name, search.url,
+                    store, buffer, scraper, site.name, search.name, search.url,
                     start_page, num_pages,
                 )
-                # Record the seed only on the first successful wide fetch, and
-                # persist it so future restarts skip re-seeding this search.
+                # Mark seeded for this run so we don't re-seed it again. Not
+                # persisted: the buffer is volatile, so a restart re-seeds.
                 if site.seed_enabled and ok and not was_seeded:
                     seeded.add(seed_key)
-                    store.mark_seeded(seed_key)
 
     def _process_search(
-        self, store: Store, scraper, site_name: str, search_name: str, url: str,
-        start_page: int, num_pages: int,
+        self, store: Store, buffer: ListingBuffer, scraper, site_name: str,
+        search_name: str, url: str, start_page: int, num_pages: int,
     ) -> bool:
         """Returns True if the fetch succeeded (so it can be marked seeded)."""
         try:
             listings = scraper.fetch_listings(
                 search_name, url, start_page, num_pages,
-                stored_attrs=lambda lid: store.get_listing_attrs(
-                    f"{site_name}:{lid}"),
+                stored_attrs=lambda lid: buffer.attrs(f"{site_name}:{lid}"),
             )
         except CircuitBreakerTripped as exc:
             log.error("%s — skipping site this cycle.", exc)
@@ -181,45 +180,36 @@ class Engine:
             log.exception("Scrape failed for search %r", search_name)
             return False
 
-        # Pass 1: store everything first, so the corpus is complete before we
-        # judge anything. (Judging while still filling the store would evaluate
-        # early listings against a near-empty group.)
-        new_count = deal_count = 0
-        touched: set[tuple[str, str, int, str]] = set()
+        # Add this page's listings to the in-memory buffer (deduped by key).
+        # Nothing is written to disk here — medians are rebuilt from the buffer
+        # on the hourly refresh, and only alerts touch the db.
+        now = time.time()
+        before = len(buffer)
         for listing in listings:
-            is_new, _prev = store.upsert(listing)
-            new_count += int(is_new)
-            if listing.brand and listing.model and listing.year and listing.fuel:
-                touched.add(
-                    (listing.brand, listing.model, listing.year, listing.fuel))
+            buffer.upsert(listing, now)
+        new_count = max(0, len(buffer) - before)
 
-        # Seed a price-stats row for any newly-seen group that doesn't have one
-        # yet, so its listings can be judged in this same cycle. Existing rows
-        # are left untouched here and kept current by the hourly median refresh
-        # (see _maybe_refresh_medians), so a scan never repeats the full-sample
-        # recompute. Scoped to this site so markets are never mixed; one row per
-        # group, upserted — never duplicated.
-        for brand, model, year, fuel in touched:
-            if store.get_model_price(
-                    site_name, brand, model, year, fuel) is None:
-                store.update_model_price(
-                    site_name, brand, model, year, fuel,
-                    bottom_percentile=self.cfg.evaluator.bottom_percentile,
-                )
+        # Group medians, computed live from the buffer for every group with more
+        # than 4 comparables — this is what we judge against (and what the hourly
+        # refresh persists to model_prices).
+        bp = self.cfg.evaluator.bottom_percentile
+        stats_by_group = {
+            group: price_stats(prices, bp)
+            for group, prices in buffer.group_prices().items()
+            if len(prices) >= _MIN_ROWS_TO_UPDATE
+        }
 
-        # Pass 2: evaluate each listing against the single stored average price
-        # for its site+brand+model+year+fuel group.
+        # Evaluate each listing against its group's median; alert on fresh deals.
+        deal_count = 0
         for listing in listings:
             if not (listing.brand and listing.model and listing.year
                     and listing.fuel):
                 continue
-            row = store.get_model_price(
-                site_name, listing.brand, listing.model, listing.year,
-                listing.fuel,
-            )
-            if row is None:
+            stats = stats_by_group.get(
+                (listing.brand, listing.model, listing.year, listing.fuel))
+            if stats is None:
                 continue
-            verdict = self.evaluator.evaluate(listing, row)
+            verdict = self.evaluator.evaluate(listing, stats)
             if not verdict.is_deal:
                 continue
             if store.already_alerted(listing.key, listing.price):
@@ -229,12 +219,8 @@ class Engine:
                 deal_count += 1
                 log.info("DEAL alerted: %s (%s)", listing.title, verdict.reason)
 
-        # One commit for the whole scan: all the upserts + stats updates above
-        # batch into a single fsync instead of one per listing.
-        store.commit()
-
         log.info(
-            "[%s] %r: %d listings (%d new), %d deal(s) alerted.",
+            "[%s] %r: %d listings (%d new in buffer), %d deal(s) alerted.",
             scraper.site, search_name, len(listings), new_count, deal_count,
         )
         return True
