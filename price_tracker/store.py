@@ -172,6 +172,33 @@ class Store:
         self._migrate_model_prices()
         self.conn.executescript(_SCHEMA)
         self.conn.commit()
+        self._cleanup_polovni_rows()
+
+    def _cleanup_polovni_rows(self) -> None:
+        """One-time scrub of legacy polovni rows. Polovni now stores only
+        brand/model/year/fuel/price (+ the structural id/url/title/status); rows
+        written before that still hold the descriptive fields (mileage, gearbox,
+        engine, power, city, image) and the full raw JSON blob we no longer keep.
+        Null them out so the stored data matches what the scraper now writes.
+
+        Idempotent: the WHERE clause matches only rows that still carry the old
+        data, so after the first pass this is a cheap no-op each open. Scoped to
+        polovniautomobili — kleinanzeigen still stores its (thin) raw + attrs."""
+        cur = self.conn.execute(
+            "UPDATE listings SET raw = '{}', mileage = NULL, gearbox = NULL, "
+            "engine_cc = NULL, power_kw = NULL, city = NULL, image = NULL "
+            "WHERE site = 'polovniautomobili' AND ("
+            "  raw IS NOT NULL AND raw != '{}' OR mileage IS NOT NULL "
+            "  OR gearbox IS NOT NULL OR engine_cc IS NOT NULL "
+            "  OR power_kw IS NOT NULL OR city IS NOT NULL OR image IS NOT NULL)"
+        )
+        if cur.rowcount:
+            log.info(
+                "Scrubbed %d legacy polovni row(s) to the stored fields "
+                "(dropped raw blob + mileage/gearbox/engine/power/city/image).",
+                cur.rowcount,
+            )
+        self.conn.commit()
 
     def _migrate_model_prices(self) -> None:
         """model_prices is now keyed by (site, brand, model, year, fuel). Older
