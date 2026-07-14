@@ -173,6 +173,26 @@ class Store:
         self.conn.executescript(_SCHEMA)
         self.conn.commit()
         self._cleanup_polovni_rows()
+        self._maybe_vacuum()
+
+    def _maybe_vacuum(self) -> None:
+        """Reclaim disk when much of the file is dead space. SQLite never shrinks
+        the file on its own: emptied/deleted pages (e.g. the raw-blob overflow
+        pages freed by the polovni scrub above) go onto an internal free list and
+        are reused, but the file stays at its peak size until a VACUUM rebuilds
+        it. VACUUM only when a meaningful fraction of the file is free so ordinary
+        churn doesn't trigger a rewrite; once done the free list is ~empty, so
+        this is a no-op on every subsequent open."""
+        free = self.conn.execute("PRAGMA freelist_count").fetchone()[0]
+        total = self.conn.execute("PRAGMA page_count").fetchone()[0]
+        if total and free > 1000 and free / total > 0.10:
+            log.info(
+                "Reclaiming disk space: %d of %d pages free — running VACUUM.",
+                free, total,
+            )
+            self.conn.execute("VACUUM")
+            # VACUUM can reset the journal mode; re-assert WAL to be safe.
+            self.conn.execute("PRAGMA journal_mode=WAL")
 
     def _cleanup_polovni_rows(self) -> None:
         """One-time scrub of legacy polovni rows. Polovni now stores only
