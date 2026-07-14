@@ -91,6 +91,12 @@ class PolovniScraper(Scraper):
 
         currency = "EUR" if r.get("priceCurrency") in ("€", "EUR", None) else str(r.get("priceCurrency"))
 
+        # Persist ONLY what the median/deal logic needs: brand, model, year, fuel
+        # and price (+ its currency). The record still needs an id to dedup on,
+        # a url/title for the alert message, and status for the active-filter —
+        # those are structural, not ad detail. Everything else (mileage, gearbox,
+        # engine, power, city, image) and the full raw JSON blob are deliberately
+        # NOT stored; Listing's remaining fields keep their None/empty defaults.
         return Listing(
             site=self.site,
             listing_id=listing_id,
@@ -102,18 +108,8 @@ class PolovniScraper(Scraper):
             brand=_clean(r.get("brand")),
             model=_clean(r.get("model")),
             year=_int(r.get("year")),
-            mileage=_int(r.get("mileage")),
             fuel=_clean(r.get("fuel")),
-            gearbox=_clean(r.get("gearBox")),
-            engine_cc=_int(r.get("engineVolume")),
-            power_kw=_int(r.get("power")),
-            city=_clean(r.get("city")),
             status=str(r.get("status") or "active"),
-            # Always a regular private ad here — featured/promoted ads are
-            # filtered out before we ever build a Listing.
-            featured=False,
-            image=r.get("imageMain"),
-            raw=r,
         )
 
 

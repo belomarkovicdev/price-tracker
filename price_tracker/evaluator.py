@@ -2,7 +2,7 @@
 
 Approach (robust to outliers and scams):
   * Each brand+model+year has a single stored row of price stats (median, MAD,
-    low-percentile), recomputed at most once per 24h from the full sample (see
+    low-percentile), recomputed hourly from the full sample (see
     store.update_model_price). Evaluation reads just that one row.
   * Use MEDIAN + MAD, not mean/stddev — one absurd listing can't skew the median.
   * A listing is a deal when its price is meaningfully below the pack:
