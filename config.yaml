@@ -88,29 +88,26 @@ sites:
     request_delay_seconds: 5
     jitter_seconds: 4
     # kleinanzeigen soft-blocks datacenter IPs: it answers HTTP 200 with a page
-    # that has no results container, so the scraper now raises "no results
+    # that has no results container, so the scraper raises "no results
     # container ... (soft block?)" and backs off instead of silently logging 0
-    # listings. To get real results from a datacenter host (e.g. Railway), route
-    # this site through a residential/mobile/WARP proxy. Set it here, or leave it
-    # out and use the PROXY_URL (or PROXY_URL_KLEINANZEIGEN) env var so the
-    # endpoint/credentials stay out of the committed config. Empty = direct.
-    # proxy_url: "http://user:pass@host:port"
+    # listings. Getting real results from a datacenter host (e.g. Railway) needs
+    # traffic to egress from a non-datacenter IP — approach still TBD.
     # Results are sorted newest-first, so new posts land on page 1.
     skip_pages: 0
     # No seeding: we don't want to bulk-import history, just watch for new posts
     # and grow the comparable corpus organically. Each cycle scans page 1 only.
     seed_enabled: false
-    seed_pages: 1        # unused while seed_enabled is false
+    seed_pages: 1 # unused while seed_enabled is false
     scan_pages: 1
     # Each genuinely-new ad costs one detail-page fetch (the results page lacks
     # the structured fields). A burst of new ads — e.g. 27 on first sight — would
     # otherwise fire that many requests back-to-back and risk a soft block. Cap
     # the fetches per cycle; over-budget new ads are picked up in later cycles,
     # draining the backlog at this rate. 0 = unlimited.
-    max_detail_fetches_per_cycle: 5
+    max_detail_fetches_per_cycle: 0
     # Prices are compared per site AND per fuel (a diesel is dearer than the same
     # petrol model-year), so no cross-market or cross-fuel mixing. Build the URL
     # in your browser with the filters you want, then paste it here.
-    searches:
-      - name: "Aichach ≤2000 EZ 2009+"
-        url: "https://www.kleinanzeigen.de/s-autos/aichach/preis:2000:/c216l7190r100+autos.ez_i:2009%2C"
+    #searches:
+    #  - name: "Aichach ≤2000 EZ 2009+"
+    #    url: "https://www.kleinanzeigen.de/s-autos/aichach/preis:2000:/c216l7190r100+autos.ez_i:2009%2C"

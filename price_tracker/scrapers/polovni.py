@@ -4,7 +4,7 @@ The site is a Next.js app: every search-results page embeds the full, structured
 listing data as JSON in a `<script id="__NEXT_DATA__">` tag. We parse that JSON
 directly instead of scraping fragile HTML/CSS — it's far more robust (survives
 styling changes) and gives us clean typed fields. Plain HTTP works; no browser
-or proxy is needed for this site.
+is needed for this site.
 """
 
 from __future__ import annotations

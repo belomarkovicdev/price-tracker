@@ -44,9 +44,6 @@ class SiteConfig:
     seed_enabled: bool       # if False, never seed — only ever the steady-state
                              # scan (watch for new posts, build the corpus slowly)
     searches: list[SearchConfig]
-    proxy_url: str = ""      # route this site's requests through a proxy (e.g. a
-                             # residential/mobile/WARP egress so a datacenter IP
-                             # isn't soft-blocked). Empty = direct connection.
     max_detail_fetches_per_cycle: int = 0
                              # cap detail-page fetches per cycle so a burst of new
                              # ads doesn't fire a rapid run of requests. 0 =
@@ -117,15 +114,6 @@ def load_config(path: Path | None = None) -> Config:
             SearchConfig(name=s["name"], url=s["url"])
             for s in (cfg.get("searches", []) or [])
         ]
-        # Proxy: per-site config wins; otherwise a site-specific env var
-        # (PROXY_URL_<SITE>), then a global PROXY_URL. Env is handy on hosts like
-        # Railway where the endpoint (and its credentials) shouldn't live in the
-        # committed config.
-        proxy_url = (
-            cfg.get("proxy_url")
-            or os.environ.get(f"PROXY_URL_{name.upper()}")
-            or os.environ.get("PROXY_URL", "")
-        )
         sites.append(
             SiteConfig(
                 name=name,
@@ -137,7 +125,6 @@ def load_config(path: Path | None = None) -> Config:
                 scan_pages=max(1, int(cfg.get("scan_pages", 2))),
                 seed_enabled=bool(cfg.get("seed_enabled", True)),
                 searches=searches,
-                proxy_url=str(proxy_url).strip(),
                 max_detail_fetches_per_cycle=max(
                     0, int(cfg.get("max_detail_fetches_per_cycle", 0))),
             )
