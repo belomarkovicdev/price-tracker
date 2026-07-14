@@ -264,6 +264,7 @@ class Store:
     def update_model_price(
         self, site: str, brand: str, model: str, year: int, fuel: str,
         bottom_percentile: float = 20.0,
+        min_rows: int = 1,
     ) -> Optional[dict]:
         """Recompute the price stats (avg, median, MAD, low-percentile) across
         all active, priced listings with this exact site+brand+model+year+fuel
@@ -279,14 +280,18 @@ class Store:
         This always recomputes from the full sample; callers decide *when* to
         call it. The engine computes a row the first time a group is seen (so it
         can be judged that same cycle), and the hourly maintenance pass
-        force-refreshes every group seen in the last hour."""
+        force-refreshes every group seen in the last hour.
+
+        `min_rows` skips the group unless it has at least that many priced,
+        active comparables (returns None without touching the stored row) — the
+        hourly pass uses it to only update groups with more than 4 rows."""
         prices = [r["price"] for r in self.conn.execute(
             "SELECT price FROM listings "
             "WHERE site = ? AND brand = ? AND model = ? AND year = ? "
             "AND fuel = ? AND price IS NOT NULL AND status = 'active'",
             (site, brand, model, year, fuel),
         )]
-        if not prices:
+        if len(prices) < min_rows:
             return None
         median = statistics.median(prices)
         stats = {
@@ -317,32 +322,36 @@ class Store:
 
     def refresh_medians_since(
         self, since_ts: float, bottom_percentile: float = 20.0,
+        min_rows: int = 1,
     ) -> tuple[int, int]:
         """Force-recompute the stored price stats (median/MAD/low-percentile) for
         every group that received a listing since `since_ts`, and return
-        (groups_refreshed, listings_covered).
+        (groups_updated, listings_covered).
 
-        The time window only selects WHICH groups to refresh — the ones whose
+        The time window only selects WHICH groups to consider — the ones whose
         data changed in the last hour. Each group's median is still computed over
         its FULL active corpus (via update_model_price, which recomputes from the
         whole sample), because an hour of listings alone is too thin to be a
-        robust median. Does not commit — the caller does."""
-        groups = self.conn.execute(
+        robust median. `min_rows` is passed straight through, so groups with
+        fewer than that many comparables are skipped (not updated). Does not
+        commit — the caller does."""
+        candidates = self.conn.execute(
             "SELECT DISTINCT site, brand, model, year, fuel FROM listings "
             "WHERE last_seen >= ? AND price IS NOT NULL AND status = 'active' "
             "AND brand IS NOT NULL AND model IS NOT NULL "
             "AND year IS NOT NULL AND fuel IS NOT NULL",
             (since_ts,),
         ).fetchall()
-        listings = 0
-        for g in groups:
+        updated = listings = 0
+        for g in candidates:
             stats = self.update_model_price(
                 g["site"], g["brand"], g["model"], g["year"], g["fuel"],
-                bottom_percentile=bottom_percentile,
+                bottom_percentile=bottom_percentile, min_rows=min_rows,
             )
             if stats is not None:
+                updated += 1
                 listings += stats["sample_count"]
-        return len(groups), listings
+        return updated, listings
 
     def get_model_price(
         self, site: str, brand: str, model: str, year: int, fuel: str
