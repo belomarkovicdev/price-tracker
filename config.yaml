@@ -2,7 +2,7 @@
 # Secrets (Telegram token/chat) live in .env, NOT here.
 
 # How often to run a full poll cycle across all enabled searches.
-poll_interval_seconds: 20
+poll_interval_seconds: 120
 
 # How often the engine prunes the in-memory buffer, rebuilds the stored market
 # medians from it, and posts a Telegram "DB is being updated" heartbeat. Default
